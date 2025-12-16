@@ -4,17 +4,73 @@ from google.generativeai import caching
 from google.generativeai.types import HarmCategory, HarmBlockThreshold
 import datetime
 import re
+import sqlite3
 
 # --- PAGE CONFIGURATION ---
-st.set_page_config(page_title="Gemini 3 Author Studio", layout="wide")
+st.set_page_config(page_title="Gemini 3 Author Studio (Persistent)", layout="wide")
+st.title("Drafting with Gemini 3 Pro (Auto-Save Enabled)")
 
-st.title("Drafting with Gemini 3 Pro")
-st.markdown("Advanced Chapter Drafting with **Edit Mode** & **Context Caching**.")
+# --- DATABASE SETUP ---
+DB_NAME = "my_novel.db"
+
+def init_db():
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    # Table for the Book Info
+    c.execute('''CREATE TABLE IF NOT EXISTS book_info (
+                    id INTEGER PRIMARY KEY,
+                    concept TEXT,
+                    outline TEXT
+                )''')
+    # Table for Chapters
+    c.execute('''CREATE TABLE IF NOT EXISTS chapters (
+                    chapter_num INTEGER PRIMARY KEY,
+                    content TEXT
+                )''')
+    conn.commit()
+    conn.close()
+
+def load_from_db():
+    conn = sqlite3.connect(DB_NAME)
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    
+    # Load Bible
+    c.execute("SELECT * FROM book_info WHERE id=1")
+    bible = c.fetchone()
+    
+    # Load Chapters
+    c.execute("SELECT * FROM chapters ORDER BY chapter_num")
+    chapters = c.fetchall()
+    conn.close()
+    return bible, chapters
+
+def save_bible(concept, outline):
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO book_info (id, concept, outline) VALUES (1, ?, ?)", (concept, outline))
+    conn.commit()
+    conn.close()
+
+def save_chapter(num, content):
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO chapters (chapter_num, content) VALUES (?, ?)", (num, content))
+    conn.commit()
+    conn.close()
+
+def delete_last_chapter(num):
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("DELETE FROM chapters WHERE chapter_num=?", (num,))
+    conn.commit()
+    conn.close()
+
+# Initialize DB
+init_db()
 
 # --- HARDCODED MODEL ---
 MODEL_NAME = "gemini-3-pro-preview"
-
-# --- SAFETY SETTINGS ---
 safety_settings = {
     HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
     HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
@@ -24,81 +80,72 @@ safety_settings = {
 
 # --- HELPER: TEXT CLEANER ---
 def clean_text_formatting(text):
-    """
-    Aggressive cleaner:
-    1. Replaces any sequence of newlines (with or without spaces) with exactly two newlines.
-    2. Strips leading/trailing whitespace.
-    """
     if not text: return ""
-    # Regex explanation: \n followed by any amount of whitespace (\s*) followed by \n
-    text = re.sub(r'\n\s*\n', '\n\n', text)
+    text = re.sub(r'\n\s*\n', '\n\n', text) # The nuclear spacer fixer
     return text.strip()
 
-# --- HELPER: CACHING ---
+# --- CACHING ---
 def get_or_create_cache(bible_text, outline_text):
     static_content = f"### THE BIBLE (Static Context)\n{bible_text}\n\n### THE FULL OUTLINE\n{outline_text}"
-    
     if 'cache_name' in st.session_state:
         try:
             cache = genai.caching.CachedContent.get(name=st.session_state.cache_name)
             cache.update(ttl=datetime.timedelta(hours=2))
             return cache.name
-        except Exception:
-            del st.session_state.cache_name
-
+        except: del st.session_state.cache_name
     try:
         cache = genai.caching.CachedContent.create(
-            model=MODEL_NAME, 
-            display_name="book_bible_v1", 
-            system_instruction="You are an expert novelist. Use this bible to write chapters.",
-            contents=[static_content],
-            ttl=datetime.timedelta(hours=2)
+            model=MODEL_NAME, display_name="book_bible_v1", contents=[static_content], ttl=datetime.timedelta(hours=2)
         )
         st.session_state.cache_name = cache.name
-        st.toast(f"✅ Bible Cached for {MODEL_NAME}!", icon="💾")
         return cache.name
-    except Exception as e:
-        print(f"Cache Warning: {e}")
-        return None
+    except Exception: return None
 
-# --- SIDEBAR ---
+# --- SIDEBAR & SETUP ---
 with st.sidebar:
     st.header("Settings")
-    
     if "GOOGLE_API_KEY" in st.secrets:
         api_key = st.secrets["GOOGLE_API_KEY"]
-        st.success("✅ API Key loaded securely.")
     else:
         api_key = st.text_input("Enter Google API Key", type="password")
-    
-    st.info(f"⚡ Using Model: **{MODEL_NAME}**")
-    
+
     st.divider()
     
-    if st.button("Undo Last Confirmed Chapter", type="secondary"):
-        if len(st.session_state.book_history) > 0:
-            deleted = st.session_state.book_history.pop()
-            st.session_state.full_text = ""
-            for chap in st.session_state.book_history:
-                st.session_state.full_text += f"\n\n## Chapter {chap['chapter']}\n\n{chap['content']}"
-            st.toast(f"🗑️ Deleted Chapter {deleted['chapter']}", icon="undo")
-            st.rerun()
-        else:
-            st.error("No history to undo!")
+    # RESTORE TOOL
+    with st.expander("⚠️ Emergency Import"):
+        st.write("Lost your session? Paste your backup text here to restore history.")
+        import_text = st.text_area("Paste Full Book Text")
+        if st.button("Import & Rebuild"):
+            if import_text:
+                # Basic splitter by "## Chapter X"
+                chapters = re.split(r'## Chapter \d+', import_text)
+                conn = sqlite3.connect(DB_NAME)
+                c = conn.cursor()
+                c.execute("DELETE FROM chapters") # Clear current
+                for i, content in enumerate(chapters):
+                    if content.strip():
+                        c.execute("INSERT INTO chapters (chapter_num, content) VALUES (?, ?)", (i, content.strip()))
+                conn.commit()
+                conn.close()
+                st.success("Book Restored! Please refresh.")
 
-    if st.button("⚠️ Reset Entire Book", type="primary"):
-        st.session_state.clear()
-        st.rerun()
+# --- STATE MANAGEMENT ---
+if "editor_mode" not in st.session_state: st.session_state.editor_mode = False
 
-# --- INITIALIZATION ---
-if "book_history" not in st.session_state:
-    st.session_state.book_history = [] 
-if "full_text" not in st.session_state:
-    st.session_state.full_text = ""
-if "editor_mode" not in st.session_state:
-    st.session_state.editor_mode = False
+# LOAD DATA FROM DB
+bible_data, chapter_data = load_from_db()
 
-# --- APP START ---
+# Rebuild Session State from DB
+current_concept = bible_data['concept'] if bible_data else ""
+current_outline = bible_data['outline'] if bible_data else ""
+full_text_history = ""
+history_list = []
+
+for row in chapter_data:
+    history_list.append({"chapter": row['chapter_num'], "content": row['content']})
+    full_text_history += f"\n\n## Chapter {row['chapter_num']}\n\n{row['content']}"
+
+# --- MAIN APP ---
 if not api_key:
     st.warning("Waiting for API Key...")
     st.stop()
@@ -106,169 +153,113 @@ if not api_key:
 genai.configure(api_key=api_key)
 model = genai.GenerativeModel(MODEL_NAME, safety_settings=safety_settings)
 
-tab1, tab2, tab3 = st.tabs(["1. The Bible", "2. Writer (Edit Mode)", "3. Full Book"])
+tab1, tab2, tab3 = st.tabs(["1. The Bible", "2. Writer", "3. Full Book"])
 
-# --- TAB 1: BIBLE ---
+# TAB 1: BIBLE (Auto-Saves)
 with tab1:
     col1, col2 = st.columns(2)
     with col1:
-        st.subheader("Concept / Style")
-        concept_text = st.text_area("Style Guide, Characters, World:", height=400, key="concept", value=st.session_state.get("concept", ""))
+        new_concept = st.text_area("Concept", value=current_concept, height=400, key="concept_in")
     with col2:
-        st.subheader("Master Outline")
-        outline_text = st.text_area("Full Outline:", height=400, key="outline", value=st.session_state.get("outline", ""))
-
-# --- TAB 2: WRITER ---
-with tab2:
-    next_chap_num = len(st.session_state.book_history) + 1
-    st.header(f"Drafting Chapter {next_chap_num}")
+        new_outline = st.text_area("Outline", value=current_outline, height=400, key="outline_in")
     
-    # 2. AUTO-FETCH (FIXED PROMPT)
-    if st.button(f"🔮 Auto-Fetch Instructions for Ch. {next_chap_num}"):
-        if not outline_text:
-            st.error("Outline is empty!")
-        else:
-            with st.spinner("Scanning outline..."):
-                try:
-                    # NEW PROMPT: Forces verbatim extraction
-                    prompt = f"""
-                    Access the Full Outline provided in the context.
-                    Locate the section for **Chapter {next_chap_num}**.
-                    
-                    **TASK:** Copy the content for Chapter {next_chap_num} EXACTLY as it appears. 
-                    Include all Scene headers, POVs, Word Counts, Settings, and details.
-                    DO NOT summarize. DO NOT shorten. Just extract the raw text block.
-                    """
-                    
-                    # We use the CACHE here if possible to ensure it sees the full outline
-                    cache_name = get_or_create_cache(concept_text, outline_text)
-                    if cache_name:
-                        cache_obj = genai.caching.CachedContent.get(name=cache_name)
-                        cached_model = genai.GenerativeModel.from_cached_content(cached_content=cache_obj)
-                        response = cached_model.generate_content(prompt)
-                    else:
-                        response = model.generate_content(f"{outline_text}\n\n{prompt}")
+    if new_concept != current_concept or new_outline != current_outline:
+        if st.button("💾 Save Bible Changes"):
+            save_bible(new_concept, new_outline)
+            st.rerun()
 
-                    if response.text:
-                        st.session_state[f"plan_{next_chap_num}"] = response.text
-                        st.rerun()
-                except Exception as e:
-                    st.error(f"Fetch Error: {e}")
+# TAB 2: WRITER
+with tab2:
+    next_chap_num = len(history_list) + 1
+    st.header(f"Drafting Chapter {next_chap_num}")
 
-    # 3. INSTRUCTIONS
+    # AUTO-FETCH
+    if st.button(f"🔮 Auto-Fetch Ch. {next_chap_num}"):
+        with st.spinner("Fetching raw instructions..."):
+            prompt = f"""
+            Access the Outline. Copy the section for **Chapter {next_chap_num}** VERBATIM.
+            Do not summarize. Extract specific Scene headers, POV, and details exactly as written.
+            """
+            try:
+                # Use cache if available
+                cache_name = get_or_create_cache(new_concept, new_outline)
+                if cache_name:
+                    c_obj = genai.caching.CachedContent.get(name=cache_name)
+                    c_model = genai.GenerativeModel.from_cached_content(cached_content=c_obj)
+                    res = c_model.generate_content(prompt)
+                else:
+                    res = model.generate_content(f"{new_outline}\n\n{prompt}")
+                
+                st.session_state[f"plan_{next_chap_num}"] = res.text
+                st.rerun()
+            except Exception as e: st.error(f"Error: {e}")
+
+    # INSTRUCTIONS
     current_plan = st.session_state.get(f"plan_{next_chap_num}", "")
-    chapter_instructions = st.text_area("Chapter Instructions:", value=current_plan, height=300)
+    chapter_instructions = st.text_area("Instructions:", value=current_plan, height=250)
 
-    # 4. GENERATION ACTION
+    # GENERATE
     if not st.session_state.editor_mode:
         if st.button(f"🚀 Generate Chapter {next_chap_num}", type="primary"):
-            with st.spinner("Gemini 3 is writing..."):
+            with st.spinner("Writing..."):
+                cache_name = get_or_create_cache(new_concept, new_outline)
+                dynamic_prompt = f"""
+                ### STORY SO FAR
+                {full_text_history}
+                ### CHAPTER INSTRUCTIONS
+                {chapter_instructions}
+                ### TASK
+                Write Chapter {next_chap_num}. Use '***' for scene breaks.
+                """
                 try:
-                    cache_name = get_or_create_cache(concept_text, outline_text)
-                    
-                    dynamic_prompt = f"""
-                    ### STORY SO FAR
-                    {st.session_state.full_text}
-                    
-                    ### CHAPTER INSTRUCTIONS
-                    {chapter_instructions}
-                    
-                    ### TASK
-                    Write Chapter {next_chap_num}. Output ONLY the story text.
-                    **FORMATTING RULE:** Use '***' on a separate line to indicate scene breaks.
-                    """
-                    
-                    response = None
                     if cache_name:
-                        try:
-                            cache_obj = genai.caching.CachedContent.get(name=cache_name)
-                            cached_model = genai.GenerativeModel.from_cached_content(
-                                cached_content=cache_obj, 
-                                safety_settings=safety_settings
-                            )
-                            response = cached_model.generate_content(dynamic_prompt)
-                        except:
-                            cache_name = None 
-                    
-                    if not cache_name:
-                        full_prompt = f"### BIBLE\n{concept_text}\n### OUTLINE\n{outline_text}\n{dynamic_prompt}"
-                        response = model.generate_content(full_prompt)
-
-                    if hasattr(response, 'text') and response.text:
-                        # CLEAN IMMEDIATELY using the nuclear option
-                        clean_text = clean_text_formatting(response.text)
-                        
-                        st.session_state.editor_content = clean_text 
-                        st.session_state.editor_mode = True 
-                        st.rerun()
+                        c_obj = genai.caching.CachedContent.get(name=cache_name)
+                        c_model = genai.GenerativeModel.from_cached_content(cached_content=c_obj, safety_settings=safety_settings)
+                        response = c_model.generate_content(dynamic_prompt)
                     else:
-                        st.error("Empty response (Safety Blocked).")
-                        
-                except Exception as e:
-                    st.error(f"Error: {e}")
+                        response = model.generate_content(f"{new_concept}\n{new_outline}\n{dynamic_prompt}")
 
-    # 5. THE EDITING STAGE
+                    if response.text:
+                        st.session_state.editor_content = clean_text_formatting(response.text)
+                        st.session_state.editor_mode = True
+                        st.rerun()
+                except Exception as e: st.error(f"Error: {e}")
     else:
-        st.info("📝 **Edit Mode Active**")
-        
-        # Utility to re-clean if user pastes something messy
-        if st.button("🧹 Force Clean Formatting"):
+        st.info("📝 Edit Mode")
+        if st.button("🧹 Re-Clean Formatting"):
             st.session_state.editor_content = clean_text_formatting(st.session_state.editor_content)
             st.rerun()
-
-        edited_text = st.text_area(
-            f"Editing Chapter {next_chap_num}...", 
-            height=600,
-            key="editor_content" 
-        )
-        
-        col_save, col_discard = st.columns([1, 4])
-        
-        with col_save:
-            if st.button("💾 Confirm & Add to Book", type="primary"):
-                st.session_state.book_history.append({
-                    "chapter": next_chap_num,
-                    "content": edited_text
-                })
-                st.session_state.full_text += f"\n\n## Chapter {next_chap_num}\n\n{edited_text}"
-                st.session_state.editor_mode = False 
-                del st.session_state.editor_content 
-                st.success("Chapter Saved!")
-                st.rerun()
-                
-        with col_discard:
-            if st.button("❌ Discard & Retry"):
-                st.session_state.editor_mode = False
-                if 'editor_content' in st.session_state:
-                    del st.session_state.editor_content
-                st.rerun()
-
-    # 6. HISTORY PREVIEW
-    if st.session_state.book_history and not st.session_state.editor_mode:
-        st.divider()
-        last = st.session_state.book_history[-1]
-        st.caption(f"Last Saved: Chapter {last['chapter']}")
-        st.text_area("Read-Only Preview", value=last['content'], height=200, disabled=True)
-
-# --- TAB 3: EXPORT ---
-with tab3:
-    st.header("The Manuscript")
-    
-    col_tools1, col_tools2 = st.columns(2)
-    with col_tools1:
-        if st.button("🧹 Fix Full Book Formatting"):
-            st.session_state.full_text = clean_text_formatting(st.session_state.full_text)
-            st.rerun()
             
-    with col_tools2:
-        if st.button("📏 Single Spaced Mode"):
-            st.session_state.full_text = re.sub(r'\n+', '\n', st.session_state.full_text)
-            st.rerun()
+        edited_text = st.text_area(f"Editing Ch {next_chap_num}", height=600, key="editor_content")
+        
+        c1, c2 = st.columns([1,4])
+        with c1:
+            if st.button("💾 Save to Disk"):
+                save_chapter(next_chap_num, edited_text)
+                st.session_state.editor_mode = False
+                del st.session_state.editor_content
+                st.success("Saved to Database!")
+                st.rerun()
+        with c2:
+            if st.button("❌ Discard"):
+                st.session_state.editor_mode = False
+                del st.session_state.editor_content
+                st.rerun()
 
-    st.text_area("Full Text (Ctrl+A to Copy)", value=st.session_state.full_text, height=600)
-    
-    st.download_button(
-        "Download .txt", 
-        data=st.session_state.full_text, 
-        file_name="gemini_novel.txt"
-    )
+    # HISTORY & UNDO
+    if history_list and not st.session_state.editor_mode:
+        st.divider()
+        st.write("### History")
+        if st.button("Undo Last Saved Chapter"):
+            delete_last_chapter(len(history_list))
+            st.rerun()
+        
+        last = history_list[-1]
+        st.caption(f"Last Saved: Chapter {last['chapter']}")
+        st.text_area("Preview", value=last['content'], height=200, disabled=True)
+
+# TAB 3: EXPORT
+with tab3:
+    st.header("The Full Manuscript")
+    st.text_area("Full Book", value=full_text_history, height=600)
+    st.download_button("Download .txt", full_text_history, "my_book.txt")
