@@ -11,8 +11,8 @@ st.set_page_config(page_title="Gemini Author Studio", layout="wide")
 st.title("Drafting with Gemini")
 st.markdown("Advanced Chapter Drafting using Context Caching.")
 
-# --- SAFETY SETTINGS ---
-# Disable safety filters to prevent "finish_reason: 1" blocks on action/horror scenes
+# --- SAFETY SETTINGS (CRITICAL FOR HORROR/ACTION) ---
+# We disable safety filters so the AI can write about zombies, combat, and dark themes.
 safety_settings = {
     HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
     HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
@@ -30,6 +30,7 @@ def get_or_create_cache(bible_text, outline_text, model_name):
     # Check if cache exists and matches the current model
     if 'cache_name' in st.session_state and st.session_state.get('cache_model') == model_name:
         try:
+            # Check if valid
             cache = genai.caching.CachedContent.get(name=st.session_state.cache_name)
             cache.update(ttl=datetime.timedelta(hours=2))
             return cache.name
@@ -161,6 +162,7 @@ with tab2:
         else:
             with st.spinner(f"Writing Chapter {chapter_num} with {model_name}..."):
                 try:
+                    # A. Try to cache the Bible
                     cache_name = get_or_create_cache(concept_text, outline_text, model_name)
                     
                     dynamic_prompt = f"""
@@ -174,16 +176,17 @@ with tab2:
                     Write Chapter {chapter_num}. Output ONLY the story text.
                     """
                     
-                    # Generate Logic
+                    # B. Generate
                     response = None
                     
                     # 1. Cached Path
                     if cache_name:
                         try:
                             cache_obj = genai.caching.CachedContent.get(name=cache_name)
+                            # CORRECT WAY to use cache in Python SDK:
                             cached_model = genai.GenerativeModel.from_cached_content(
                                 cached_content=cache_obj,
-                                safety_settings=safety_settings
+                                safety_settings=safety_settings # Apply safety here too!
                             )
                             response = cached_model.generate_content(dynamic_prompt)
                         except Exception as e:
@@ -195,7 +198,7 @@ with tab2:
                         full_prompt = f"### BIBLE\n{concept_text}\n### OUTLINE\n{outline_text}\n{dynamic_prompt}"
                         response = model.generate_content(full_prompt)
 
-                    # Save Result
+                    # C. Save Result
                     if hasattr(response, 'text') and response.text:
                         generated_text = response.text
                         st.session_state.book_history.append({
@@ -213,21 +216,28 @@ with tab2:
                 except Exception as e:
                     st.error(f"Generation Error: {e}")
 
-    # PREVIEW WITH COPY BUTTON
+    # PREVIEW (Use text_area for clean copying)
     if st.session_state.book_history:
         last_chapter = st.session_state.book_history[-1]
         st.markdown("---")
         st.subheader(f"Preview: Chapter {last_chapter['chapter']}")
         
-        # TIP: This block creates the "Copy" icon in the top right
-        st.code(last_chapter['content'], language=None, wrap_lines=True)
+        st.text_area(
+            label="Copy your chapter here:",
+            value=last_chapter['content'],
+            height=400,
+            key=f"preview_{chapter_num}"
+        )
 
 # --- TAB 3: READ & EXPORT ---
 with tab3:
     st.header("The Full Manuscript")
     
-    # Also added copy button here for the full book
-    st.code(st.session_state.full_text, language=None, wrap_lines=True)
+    st.text_area(
+        label="Full Book Text (Ctrl+A to Copy)",
+        value=st.session_state.full_text,
+        height=600
+    )
     
     st.download_button(
         label="Download Book as .txt",
