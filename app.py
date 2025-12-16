@@ -120,7 +120,7 @@ with st.sidebar:
 
     st.divider()
     
-    # --- ROBUST IMPORTER ---
+    # --- ROBUST IMPORTER (FIXED FOR PYTHON 3.13) ---
     with st.expander("⚠️ Emergency Import (Word Doc Fix)"):
         st.write("Paste your full text (Chapters 1-7). I will strictly look for 'Chapter X' headers.")
         import_text = st.text_area("Paste Text Here", height=300)
@@ -133,8 +133,9 @@ with st.sidebar:
                 # 1. Wipe database to prevent duplicates
                 c.execute("DELETE FROM chapters")
                 
-                # 2. Advanced Split: Keep the "Chapter X" delimiter
-                chunks = re.split(r'((?i)chapter\s+\d+)', import_text)
+                # 2. Advanced Split: FIX APPLIED HERE
+                # We moved (?i) to the start of the pattern: r'(?i)(chapter\s+\d+)'
+                chunks = re.split(r'(?i)(chapter\s+\d+)', import_text)
                 
                 current_chapter_num = 0
                 current_content = ""
