@@ -90,8 +90,9 @@ if "book_history" not in st.session_state:
     st.session_state.book_history = [] 
 if "full_text" not in st.session_state:
     st.session_state.full_text = ""
-if "temp_generated_chapter" not in st.session_state:
-    st.session_state.temp_generated_chapter = None
+# We use 'editor_mode' to track if we are currently editing a draft
+if "editor_mode" not in st.session_state:
+    st.session_state.editor_mode = False
 
 # --- APP START ---
 if not api_key:
@@ -140,7 +141,7 @@ with tab2:
     chapter_instructions = st.text_area("Chapter Instructions:", value=current_plan, height=150)
 
     # 4. GENERATION ACTION
-    if st.session_state.temp_generated_chapter is None:
+    if not st.session_state.editor_mode:
         if st.button(f"🚀 Generate Chapter {next_chap_num}", type="primary"):
             with st.spinner("Gemini 3 is writing..."):
                 try:
@@ -159,7 +160,6 @@ with tab2:
                     """
                     
                     response = None
-                    # Try Cached Generation
                     if cache_name:
                         try:
                             cache_obj = genai.caching.CachedContent.get(name=cache_name)
@@ -169,19 +169,19 @@ with tab2:
                             )
                             response = cached_model.generate_content(dynamic_prompt)
                         except:
-                            cache_name = None # Fallback
+                            cache_name = None 
                     
-                    # Fallback Standard Generation
                     if not cache_name:
                         full_prompt = f"### BIBLE\n{concept_text}\n### OUTLINE\n{outline_text}\n{dynamic_prompt}"
                         response = model.generate_content(full_prompt)
 
                     if hasattr(response, 'text') and response.text:
-                        # FIX: Auto-Clean the text BEFORE showing it in the editor
-                        clean_text = re.sub(r'\n{3,}', '\n\n', response.text)
-                        clean_text = clean_text.strip() # Remove start/end spaces
+                        # CLEAN IMMEDIATELY
+                        clean_text = re.sub(r'\n{3,}', '\n\n', response.text).strip()
                         
-                        st.session_state.temp_generated_chapter = clean_text
+                        # Set session state for the editor
+                        st.session_state.editor_content = clean_text 
+                        st.session_state.editor_mode = True # Switch to edit mode
                         st.rerun()
                     else:
                         st.error("Empty response (Safety Blocked).")
@@ -189,21 +189,25 @@ with tab2:
                 except Exception as e:
                     st.error(f"Error: {e}")
 
-    # 5. THE EDITING STAGE
+    # 5. THE EDITING STAGE (Visible only when editor_mode is True)
     else:
         st.info("📝 **Edit Mode Active** - Review and polish before saving.")
         
-        # UTILITY BUTTON FOR MANUAL CLEANING
-        if st.button("🧹 Clean Extra Spaces (Editor)", help="Click if you see big gaps in the text box below"):
-            current_draft = st.session_state.temp_generated_chapter
-            st.session_state.temp_generated_chapter = re.sub(r'\n{3,}', '\n\n', current_draft).strip()
+        # UTILITY BUTTON - NOW FIXED WITH STATE SYNC
+        if st.button("🧹 Clean Extra Spaces (Editor)", help="Forces single empty line between paragraphs"):
+            # Get current content from widget state or session state
+            raw_text = st.session_state.editor_content
+            # Regex: Find 3+ newlines OR newlines with spaces in between
+            cleaned = re.sub(r'\n\s*\n', '\n\n', raw_text).strip()
+            # FORCE UPDATE THE WIDGET KEY
+            st.session_state.editor_content = cleaned
             st.rerun()
 
-        # The Editor
+        # THE EDITOR TEXT AREA (Bound to 'editor_content' key)
         edited_text = st.text_area(
             f"Editing Chapter {next_chap_num}...", 
-            value=st.session_state.temp_generated_chapter, 
-            height=600
+            height=600,
+            key="editor_content" # This binds it to st.session_state.editor_content
         )
         
         col_save, col_discard = st.columns([1, 4])
@@ -216,17 +220,20 @@ with tab2:
                 })
                 st.session_state.full_text += f"\n\n## Chapter {next_chap_num}\n\n{edited_text}"
                 
-                st.session_state.temp_generated_chapter = None
+                st.session_state.editor_mode = False # Exit edit mode
+                del st.session_state.editor_content # Clean up
                 st.success("Chapter Saved!")
                 st.rerun()
                 
         with col_discard:
             if st.button("❌ Discard & Retry"):
-                st.session_state.temp_generated_chapter = None
+                st.session_state.editor_mode = False
+                if 'editor_content' in st.session_state:
+                    del st.session_state.editor_content
                 st.rerun()
 
     # 6. HISTORY PREVIEW
-    if st.session_state.book_history and st.session_state.temp_generated_chapter is None:
+    if st.session_state.book_history and not st.session_state.editor_mode:
         st.divider()
         last = st.session_state.book_history[-1]
         st.caption(f"Last Saved: Chapter {last['chapter']}")
