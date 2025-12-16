@@ -7,8 +7,8 @@ import time
 # --- PAGE CONFIGURATION ---
 st.set_page_config(page_title="Gemini Author Studio", layout="wide")
 
-st.title("Drafting with Gemini 3")
-st.markdown("Advanced Chapter Drafting using Context Caching & Deep Reasoning.")
+st.title("Drafting with Gemini")
+st.markdown("Advanced Chapter Drafting using Context Caching.")
 
 # --- HELPER FUNCTION: CACHING ---
 def get_or_create_cache(bible_text, outline_text, model_name):
@@ -30,7 +30,7 @@ def get_or_create_cache(bible_text, outline_text, model_name):
 
     # 3. Create New Cache
     try:
-        # We use the dynamic 'model_name' passed from the function call
+        # Use the EXACT model selected in the sidebar
         cache = genai.caching.CachedContent.create(
             model=model_name, 
             display_name="book_bible_v1", 
@@ -43,12 +43,9 @@ def get_or_create_cache(bible_text, outline_text, model_name):
         st.toast(f"✅ Bible Cached for {model_name}!", icon="💾")
         return cache.name
     except Exception as e:
-        if "400" in str(e): 
-            return None 
-        else:
-            # Silent fail on cache (so the app doesn't crash), just log to console
-            print(f"Cache Error (Non-Fatal): {e}")
-            return None
+        # If cache fails (e.g. 404 or text too short), we return None and just use standard generation
+        print(f"Cache Warning: {e}")
+        return None
 
 # --- SIDEBAR: SETTINGS ---
 with st.sidebar:
@@ -61,15 +58,14 @@ with st.sidebar:
     else:
         api_key = st.text_input("Enter Google API Key", type="password")
     
-    # Model Selection (Using STABLE names to prevent 404s)
+    # Model Selection
     model_name = st.selectbox(
         "Select Model", 
         [
-            "gemini-1.5-pro",             # Stable Pro
-            "gemini-1.5-flash",           # Stable Flash
-            "gemini-1.5-pro-002",         # Latest Pro
-            "gemini-2.0-flash-exp",       # Experimental 2.0
-            "gemini-3-pro-preview",       # Paid Preview (If you have access)
+            "gemini-3-pro-preview",       # Your preferred model
+            "gemini-2.0-flash-exp",       # Backup 1
+            "gemini-1.5-pro",             # Backup 2
+            "gemini-1.5-flash",           # Backup 3
         ]
     )
     
@@ -130,17 +126,17 @@ with tab2:
         
     st.markdown(f"**Drafting Chapter {chapter_num}**")
     
-    # 2. AUTO-FETCH BUTTON (Fixed Model Name)
+    # 2. AUTO-FETCH BUTTON (Now uses the SAME model as writing)
     if st.button(f"🔮 Auto-Fetch Chapter {chapter_num} Plan", key="fetch_btn"):
         if not outline_text:
             st.error("Please paste your Full Outline in the 'Bible' tab first!")
         else:
-            with st.spinner("Scanning outline..."):
+            with st.spinner(f"Scanning outline with {model_name}..."):
                 try:
-                    # FIX: Use generic 'gemini-1.5-flash' to avoid 404s
-                    finder_model = genai.GenerativeModel("gemini-1.5-flash") 
+                    # FIX: Use the 'model' object configured above (which uses sidebar selection)
+                    # This ensures we never use a hardcoded model that might 404
                     finder_prompt = f"Extract plot points for Chapter {chapter_num} from:\n{outline_text}"
-                    plan = finder_model.generate_content(finder_prompt).text
+                    plan = model.generate_content(finder_prompt).text
                     st.session_state[f"plan_{chapter_num}"] = plan
                     st.rerun()
                 except Exception as e:
@@ -162,7 +158,7 @@ with tab2:
         else:
             with st.spinner(f"Writing Chapter {chapter_num} with {model_name}..."):
                 try:
-                    # A. Try to cache the Bible (Passing the MODEL NAME now!)
+                    # A. Try to cache the Bible
                     cache_name = get_or_create_cache(concept_text, outline_text, model_name)
                     
                     # B. Construct Prompt
