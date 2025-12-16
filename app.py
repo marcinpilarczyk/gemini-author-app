@@ -66,6 +66,14 @@ def delete_last_chapter(num):
     conn.commit()
     conn.close()
 
+def reset_db():
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("DELETE FROM chapters")
+    c.execute("DELETE FROM book_info")
+    conn.commit()
+    conn.close()
+
 # Initialize DB
 init_db()
 
@@ -81,7 +89,8 @@ safety_settings = {
 # --- HELPER: TEXT CLEANER ---
 def clean_text_formatting(text):
     if not text: return ""
-    text = re.sub(r'\n\s*\n', '\n\n', text) # The nuclear spacer fixer
+    # The nuclear spacer fixer: replaces any chunk of vertical whitespace with exactly 2 newlines
+    text = re.sub(r'\n\s*\n', '\n\n', text) 
     return text.strip()
 
 # --- CACHING ---
@@ -111,23 +120,60 @@ with st.sidebar:
 
     st.divider()
     
-    # RESTORE TOOL
-    with st.expander("⚠️ Emergency Import"):
-        st.write("Lost your session? Paste your backup text here to restore history.")
-        import_text = st.text_area("Paste Full Book Text")
-        if st.button("Import & Rebuild"):
+    # --- ROBUST IMPORTER ---
+    with st.expander("⚠️ Emergency Import (Word Doc Fix)"):
+        st.write("Paste your full text (Chapters 1-7). I will strictly look for 'Chapter X' headers.")
+        import_text = st.text_area("Paste Text Here", height=300)
+        
+        if st.button("Force Clean Import"):
             if import_text:
-                # Basic splitter by "## Chapter X"
-                chapters = re.split(r'## Chapter \d+', import_text)
                 conn = sqlite3.connect(DB_NAME)
                 c = conn.cursor()
-                c.execute("DELETE FROM chapters") # Clear current
-                for i, content in enumerate(chapters):
-                    if content.strip():
-                        c.execute("INSERT INTO chapters (chapter_num, content) VALUES (?, ?)", (i, content.strip()))
+                
+                # 1. Wipe database to prevent duplicates
+                c.execute("DELETE FROM chapters")
+                
+                # 2. Advanced Split: Keep the "Chapter X" delimiter
+                chunks = re.split(r'((?i)chapter\s+\d+)', import_text)
+                
+                current_chapter_num = 0
+                current_content = ""
+                
+                for chunk in chunks:
+                    # If this chunk is a header (e.g., "Chapter 1")
+                    if re.match(r'(?i)chapter\s+\d+', chunk.strip()):
+                        
+                        # SAVE PREVIOUS CHAPTER (if exists)
+                        if current_chapter_num > 0:
+                            clean_content = clean_text_formatting(current_content)
+                            if clean_content:
+                                c.execute("INSERT INTO chapters (chapter_num, content) VALUES (?, ?)", 
+                                          (current_chapter_num, clean_content))
+                        
+                        # START NEW CHAPTER
+                        current_chapter_num += 1
+                        current_content = "" # Reset buffer
+                        
+                    else:
+                        # Add content to buffer
+                        current_content += chunk
+
+                # SAVE THE FINAL CHAPTER
+                if current_chapter_num > 0:
+                    clean_content = clean_text_formatting(current_content)
+                    if clean_content:
+                        c.execute("INSERT INTO chapters (chapter_num, content) VALUES (?, ?)", 
+                                  (current_chapter_num, clean_content))
+
                 conn.commit()
                 conn.close()
-                st.success("Book Restored! Please refresh.")
+                st.success(f"Successfully imported {current_chapter_num} chapters! Refreshing...")
+                st.rerun()
+
+    if st.button("🔴 DANGER: Reset All Data"):
+        reset_db()
+        st.session_state.clear()
+        st.rerun()
 
 # --- STATE MANAGEMENT ---
 if "editor_mode" not in st.session_state: st.session_state.editor_mode = False
@@ -209,7 +255,8 @@ with tab2:
                 ### CHAPTER INSTRUCTIONS
                 {chapter_instructions}
                 ### TASK
-                Write Chapter {next_chap_num}. Use '***' for scene breaks.
+                Write Chapter {next_chap_num}. Output ONLY the story text.
+                **FORMATTING RULE:** Use '***' on a separate line to indicate scene breaks.
                 """
                 try:
                     if cache_name:
@@ -220,13 +267,14 @@ with tab2:
                         response = model.generate_content(f"{new_concept}\n{new_outline}\n{dynamic_prompt}")
 
                     if response.text:
+                        # Clean BEFORE entering editor
                         st.session_state.editor_content = clean_text_formatting(response.text)
                         st.session_state.editor_mode = True
                         st.rerun()
                 except Exception as e: st.error(f"Error: {e}")
     else:
         st.info("📝 Edit Mode")
-        if st.button("🧹 Re-Clean Formatting"):
+        if st.button("🧹 Force Clean Formatting"):
             st.session_state.editor_content = clean_text_formatting(st.session_state.editor_content)
             st.rerun()
             
@@ -261,5 +309,17 @@ with tab2:
 # TAB 3: EXPORT
 with tab3:
     st.header("The Full Manuscript")
-    st.text_area("Full Book", value=full_text_history, height=600)
-    st.download_button("Download .txt", full_text_history, "my_book.txt")
+    
+    col_tools1, col_tools2 = st.columns(2)
+    with col_tools1:
+        if st.button("🧹 Clean All Formatting"):
+            full_text_history = clean_text_formatting(full_text_history)
+            st.rerun()
+    with col_tools2:
+        if st.button("📏 Single Spaced Export"):
+            st.session_state.export_text = re.sub(r'\n+', '\n', full_text_history)
+        else:
+            st.session_state.export_text = full_text_history
+
+    st.text_area("Full Book", value=st.session_state.export_text, height=600)
+    st.download_button("Download .txt", st.session_state.export_text, "my_book.txt")
