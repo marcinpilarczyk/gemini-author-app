@@ -7,7 +7,7 @@ import time
 # --- PAGE CONFIGURATION ---
 st.set_page_config(page_title="Gemini Author Studio", layout="wide")
 
-st.title("Drafting with Gemini")
+st.title("Drafting with Gemini 3")
 st.markdown("Advanced Chapter Drafting using Context Caching & Deep Reasoning.")
 
 # --- HELPER FUNCTION: CACHING ---
@@ -19,20 +19,16 @@ def get_or_create_cache(bible_text, outline_text, model_name):
     static_content = f"### THE BIBLE (Static Context)\n{bible_text}\n\n### THE FULL OUTLINE\n{outline_text}"
     
     # 2. Check if cache exists AND matches the current model
-    # (If we switch from Gemini 3 to Flash, we must recreate the cache)
     if 'cache_name' in st.session_state and st.session_state.get('cache_model') == model_name:
         try:
-            # Verify it's still valid on Google's servers
+            # Verify it's still valid
             cache = genai.caching.CachedContent.get(name=st.session_state.cache_name)
-            # Extend life by 2 hours
             cache.update(ttl=datetime.timedelta(hours=2))
             return cache.name
         except Exception:
-            # If invalid (expired), clear it
             del st.session_state.cache_name
 
     # 3. Create New Cache
-    # NOTE: Caching requires minimum ~2,000 tokens (approx 1,500 words).
     try:
         # We use the dynamic 'model_name' passed from the function call
         cache = genai.caching.CachedContent.create(
@@ -43,15 +39,15 @@ def get_or_create_cache(bible_text, outline_text, model_name):
             ttl=datetime.timedelta(hours=2)
         )
         st.session_state.cache_name = cache.name
-        st.session_state.cache_model = model_name # Remember which model owns this cache
+        st.session_state.cache_model = model_name 
         st.toast(f"✅ Bible Cached for {model_name}!", icon="💾")
         return cache.name
     except Exception as e:
         if "400" in str(e): 
-            # Content too short (<2000 tokens) to cache. This is normal for testing.
             return None 
         else:
-            st.error(f"Cache Error: {e}")
+            # Silent fail on cache (so the app doesn't crash), just log to console
+            print(f"Cache Error (Non-Fatal): {e}")
             return None
 
 # --- SIDEBAR: SETTINGS ---
@@ -64,16 +60,16 @@ with st.sidebar:
         st.success("✅ API Key loaded securely.")
     else:
         api_key = st.text_input("Enter Google API Key", type="password")
-        st.caption("Tip: Add to Secrets to skip this.")
     
-    # Model Selection
+    # Model Selection (Using STABLE names to prevent 404s)
     model_name = st.selectbox(
         "Select Model", 
         [
-            "gemini-1.5-pro-002",             # Stable, High Quality
-            "gemini-1.5-flash-002",           # Fast & Cheap
-            "gemini-2.0-flash-exp",           # Experimental (New)
-            "gemini-exp-1206",                # Often referred to as "Gemini 3 Preview"
+            "gemini-1.5-pro",             # Stable Pro
+            "gemini-1.5-flash",           # Stable Flash
+            "gemini-1.5-pro-002",         # Latest Pro
+            "gemini-2.0-flash-exp",       # Experimental 2.0
+            "gemini-3-pro-preview",       # Paid Preview (If you have access)
         ]
     )
     
@@ -110,14 +106,16 @@ with tab1:
         concept_text = st.text_area(
             "Paste your World Rules, Characters, and Tone guide here:",
             height=400,
-            placeholder="Genre: Cyberpunk.\nProtagonist: Kael..."
+            value=st.session_state.get("concept_text", ""), # Persist value
+            key="concept_input"
         )
     with col2:
         st.subheader("Full Outline")
         outline_text = st.text_area(
             "Paste your full book outline here:",
             height=400,
-            placeholder="Chapter 1: Kael wakes up..."
+            value=st.session_state.get("outline_text", ""), # Persist value
+            key="outline_input"
         )
 
 # --- TAB 2: WRITING STUDIO ---
@@ -132,15 +130,15 @@ with tab2:
         
     st.markdown(f"**Drafting Chapter {chapter_num}**")
     
-    # 2. AUTO-FETCH BUTTON
+    # 2. AUTO-FETCH BUTTON (Fixed Model Name)
     if st.button(f"🔮 Auto-Fetch Chapter {chapter_num} Plan", key="fetch_btn"):
         if not outline_text:
             st.error("Please paste your Full Outline in the 'Bible' tab first!")
         else:
             with st.spinner("Scanning outline..."):
                 try:
-                    # Use Flash for speed
-                    finder_model = genai.GenerativeModel("gemini-1.5-flash-002") 
+                    # FIX: Use generic 'gemini-1.5-flash' to avoid 404s
+                    finder_model = genai.GenerativeModel("gemini-1.5-flash") 
                     finder_prompt = f"Extract plot points for Chapter {chapter_num} from:\n{outline_text}"
                     plan = finder_model.generate_content(finder_prompt).text
                     st.session_state[f"plan_{chapter_num}"] = plan
