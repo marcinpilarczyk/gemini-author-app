@@ -3,7 +3,7 @@ import google.generativeai as genai
 from google.generativeai import caching
 from google.generativeai.types import HarmCategory, HarmBlockThreshold
 import datetime
-import time
+import re # Added for text cleaning
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(page_title="Gemini Author Studio", layout="wide")
@@ -11,8 +11,7 @@ st.set_page_config(page_title="Gemini Author Studio", layout="wide")
 st.title("Drafting with Gemini")
 st.markdown("Advanced Chapter Drafting using Context Caching.")
 
-# --- SAFETY SETTINGS (CRITICAL FOR HORROR/ACTION) ---
-# We disable safety filters so the AI can write about zombies, combat, and dark themes.
+# --- SAFETY SETTINGS ---
 safety_settings = {
     HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
     HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
@@ -27,17 +26,14 @@ def get_or_create_cache(bible_text, outline_text, model_name):
     """
     static_content = f"### THE BIBLE (Static Context)\n{bible_text}\n\n### THE FULL OUTLINE\n{outline_text}"
     
-    # Check if cache exists and matches the current model
     if 'cache_name' in st.session_state and st.session_state.get('cache_model') == model_name:
         try:
-            # Check if valid
             cache = genai.caching.CachedContent.get(name=st.session_state.cache_name)
             cache.update(ttl=datetime.timedelta(hours=2))
             return cache.name
         except Exception:
             del st.session_state.cache_name
 
-    # Create New Cache
     try:
         cache = genai.caching.CachedContent.create(
             model=model_name, 
@@ -67,10 +63,10 @@ with st.sidebar:
     model_name = st.selectbox(
         "Select Model", 
         [
-            "gemini-1.5-pro",             # Most Stable
-            "gemini-3-pro-preview",       # Smartest (Paid)
-            "gemini-2.0-flash-exp",       # Fast Experimental
-            "gemini-1.5-flash",           # Cheapest
+            "gemini-1.5-pro",             
+            "gemini-3-pro-preview",       
+            "gemini-2.0-flash-exp",       
+            "gemini-1.5-flash",           
         ]
     )
     
@@ -93,11 +89,10 @@ if not api_key:
     st.stop()
 
 genai.configure(api_key=api_key)
-# Standard model for non-cached tasks
 model = genai.GenerativeModel(model_name, safety_settings=safety_settings)
 
 # TABS
-tab1, tab2, tab3 = st.tabs(["1. The Bible (Setup)", "2. Write Chapter", "3. Read Book"])
+tab1, tab2, tab3 = st.tabs(["1. The Bible (Setup)", "2. Write Chapter", "3. Read/Export"])
 
 # --- TAB 1: THE BIBLE ---
 with tab1:
@@ -151,8 +146,7 @@ with tab2:
     current_chapter_outline = st.text_area(
         f"Specific Instructions for Chapter {chapter_num}",
         value=default_plan,
-        height=150,
-        placeholder="Click 'Auto-Fetch' above or type instructions manually."
+        height=150
     )
     
     # GENERATE BUTTON
@@ -162,7 +156,6 @@ with tab2:
         else:
             with st.spinner(f"Writing Chapter {chapter_num} with {model_name}..."):
                 try:
-                    # A. Try to cache the Bible
                     cache_name = get_or_create_cache(concept_text, outline_text, model_name)
                     
                     dynamic_prompt = f"""
@@ -176,29 +169,23 @@ with tab2:
                     Write Chapter {chapter_num}. Output ONLY the story text.
                     """
                     
-                    # B. Generate
                     response = None
-                    
-                    # 1. Cached Path
                     if cache_name:
                         try:
                             cache_obj = genai.caching.CachedContent.get(name=cache_name)
-                            # CORRECT WAY to use cache in Python SDK:
                             cached_model = genai.GenerativeModel.from_cached_content(
                                 cached_content=cache_obj,
-                                safety_settings=safety_settings # Apply safety here too!
+                                safety_settings=safety_settings 
                             )
                             response = cached_model.generate_content(dynamic_prompt)
                         except Exception as e:
                             print(f"Cache failed, falling back: {e}")
                             cache_name = None 
                             
-                    # 2. Standard Path (Fallback)
                     if not cache_name:
                         full_prompt = f"### BIBLE\n{concept_text}\n### OUTLINE\n{outline_text}\n{dynamic_prompt}"
                         response = model.generate_content(full_prompt)
 
-                    # C. Save Result
                     if hasattr(response, 'text') and response.text:
                         generated_text = response.text
                         st.session_state.book_history.append({
@@ -209,14 +196,14 @@ with tab2:
                         st.success(f"Chapter {chapter_num} Complete!")
                         st.rerun()
                     else:
-                        st.error("⚠️ Generation Empty! The model refused the prompt (Safety Block).")
+                        st.error("⚠️ Generation Empty! (Safety Block).")
                         if hasattr(response, 'candidates'):
                             st.json(response.candidates[0].safety_ratings)
                     
                 except Exception as e:
                     st.error(f"Generation Error: {e}")
 
-    # PREVIEW (Use text_area for clean copying)
+    # CLEAN PREVIEW
     if st.session_state.book_history:
         last_chapter = st.session_state.book_history[-1]
         st.markdown("---")
@@ -232,7 +219,26 @@ with tab2:
 # --- TAB 3: READ & EXPORT ---
 with tab3:
     st.header("The Full Manuscript")
+
+    # --- REPAIR TOOLS ---
+    st.warning("🛠️ Formatting Tools (Click if text looks weird in Atticus)")
+    col_tools1, col_tools2 = st.columns(2)
     
+    with col_tools1:
+        if st.button("🧹 Remove Extra Empty Lines", help="Fixes huge gaps between paragraphs"):
+            # Replaces 3+ newlines with 2 (Standard Markdown)
+            st.session_state.full_text = re.sub(r'\n{3,}', '\n\n', st.session_state.full_text)
+            st.success("Extra spaces removed!")
+            st.rerun()
+            
+    with col_tools2:
+        if st.button("📏 Compact Mode (Single Spaced)", help="Removes ALL blank lines (good for some editors)"):
+            # Replaces 2+ newlines with 1
+            st.session_state.full_text = re.sub(r'\n+', '\n', st.session_state.full_text)
+            st.success("Converted to Single Spacing!")
+            st.rerun()
+    # --------------------
+
     st.text_area(
         label="Full Book Text (Ctrl+A to Copy)",
         value=st.session_state.full_text,
