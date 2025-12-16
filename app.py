@@ -5,22 +5,22 @@ import datetime
 import time
 
 # --- PAGE CONFIGURATION ---
-st.set_page_config(page_title="Gemini 3 Author Studio", layout="wide")
+st.set_page_config(page_title="Gemini Author Studio", layout="wide")
 
-st.title("Drafting with Gemini 3 Pro")
+st.title("Drafting with Gemini")
 st.markdown("Advanced Chapter Drafting using Context Caching & Deep Reasoning.")
 
 # --- HELPER FUNCTION: CACHING ---
-def get_or_create_cache(bible_text, outline_text):
+def get_or_create_cache(bible_text, outline_text, model_name):
     """
-    Creates a cache for the static 'Bible' data if it doesn't exist.
-    Refreshes the TTL (Time To Live) if it does.
+    Creates a cache for the static 'Bible' data using the ACTIVE model.
     """
     # 1. Combine static data into one block
     static_content = f"### THE BIBLE (Static Context)\n{bible_text}\n\n### THE FULL OUTLINE\n{outline_text}"
     
-    # 2. Check if cache exists in Session State
-    if 'cache_name' in st.session_state:
+    # 2. Check if cache exists AND matches the current model
+    # (If we switch from Gemini 3 to Flash, we must recreate the cache)
+    if 'cache_name' in st.session_state and st.session_state.get('cache_model') == model_name:
         try:
             # Verify it's still valid on Google's servers
             cache = genai.caching.CachedContent.get(name=st.session_state.cache_name)
@@ -28,22 +28,23 @@ def get_or_create_cache(bible_text, outline_text):
             cache.update(ttl=datetime.timedelta(hours=2))
             return cache.name
         except Exception:
-            # If invalid (expired), clear it and recreate
+            # If invalid (expired), clear it
             del st.session_state.cache_name
 
     # 3. Create New Cache
-    # NOTE: Caching requires minimum ~2,000 tokens.
+    # NOTE: Caching requires minimum ~2,000 tokens (approx 1,500 words).
     try:
-        # We use a standard model for the cache creation reference
+        # We use the dynamic 'model_name' passed from the function call
         cache = genai.caching.CachedContent.create(
-            model='models/gemini-1.5-pro-001', 
+            model=model_name, 
             display_name="book_bible_v1", 
             system_instruction="You are an expert novelist. Use this bible to write chapters.",
             contents=[static_content],
             ttl=datetime.timedelta(hours=2)
         )
         st.session_state.cache_name = cache.name
-        st.toast(f"✅ Bible Cached! ({cache.usage_metadata.total_token_count} tokens)", icon="💾")
+        st.session_state.cache_model = model_name # Remember which model owns this cache
+        st.toast(f"✅ Bible Cached for {model_name}!", icon="💾")
         return cache.name
     except Exception as e:
         if "400" in str(e): 
@@ -69,17 +70,15 @@ with st.sidebar:
     model_name = st.selectbox(
         "Select Model", 
         [
-            "gemini-3-pro-preview",           # PAID (High Quality)
-            "gemini-2.0-flash-thinking-exp",  # FREE (High Quality Experimental)
-            "gemini-2.0-flash-exp",           # FREE (Fast)
+            "gemini-1.5-pro-002",             # Stable, High Quality
+            "gemini-1.5-flash-002",           # Fast & Cheap
+            "gemini-2.0-flash-exp",           # Experimental (New)
+            "gemini-exp-1206",                # Often referred to as "Gemini 3 Preview"
         ]
     )
     
     st.info(f"Active Model: **{model_name}**")
     
-    if "gemini-3" in model_name:
-        st.warning("⚠️ Note: Gemini 3 Pro requires a Billing Account (Credit Card) on Google Cloud.")
-
     if st.button("Reset / Clear All Memory"):
         st.session_state.clear()
         st.rerun()
@@ -125,20 +124,24 @@ with tab1:
 with tab2:
     st.header("Chapter Generator")
     
-    # 1. CALCULATE CHAPTER NUMBER FIRST (Fixes the NameError)
-    chapter_num = len(st.session_state.book_history) + 1
+    # 1. CALCULATE CHAPTER NUMBER
+    if 'book_history' in st.session_state:
+        chapter_num = len(st.session_state.book_history) + 1
+    else:
+        chapter_num = 1
+        
     st.markdown(f"**Drafting Chapter {chapter_num}**")
     
     # 2. AUTO-FETCH BUTTON
-    if st.button(f"🔮 Auto-Fetch Chapter {chapter_num} Plan"):
+    if st.button(f"🔮 Auto-Fetch Chapter {chapter_num} Plan", key="fetch_btn"):
         if not outline_text:
             st.error("Please paste your Full Outline in the 'Bible' tab first!")
         else:
             with st.spinner("Scanning outline..."):
-                # Use a cheap fast model to find the outline part
-                finder_model = genai.GenerativeModel("gemini-2.0-flash-exp") 
-                finder_prompt = f"Extract plot points for Chapter {chapter_num} from:\n{outline_text}"
                 try:
+                    # Use Flash for speed
+                    finder_model = genai.GenerativeModel("gemini-1.5-flash-002") 
+                    finder_prompt = f"Extract plot points for Chapter {chapter_num} from:\n{outline_text}"
                     plan = finder_model.generate_content(finder_prompt).text
                     st.session_state[f"plan_{chapter_num}"] = plan
                     st.rerun()
@@ -155,17 +158,16 @@ with tab2:
     )
     
     # 4. GENERATE BUTTON
-    if st.button(f"Generate Chapter {chapter_num}", type="primary"):
+    if st.button(f"Generate Chapter {chapter_num}", type="primary", key="gen_btn"):
         if not concept_text or not outline_text or not current_chapter_outline:
             st.error("Missing Concept, Outline, or Instructions!")
         else:
             with st.spinner(f"Writing Chapter {chapter_num} with {model_name}..."):
                 try:
-                    # A. Try to cache the Bible
-                    cache_name = get_or_create_cache(concept_text, outline_text)
+                    # A. Try to cache the Bible (Passing the MODEL NAME now!)
+                    cache_name = get_or_create_cache(concept_text, outline_text, model_name)
                     
                     # B. Construct Prompt
-                    # If we have a cache, we ONLY send the dynamic parts
                     dynamic_prompt = f"""
                     ### STORY SO FAR
                     {st.session_state.full_text}
@@ -179,7 +181,7 @@ with tab2:
                     
                     # C. Generate
                     if cache_name:
-                        # Optimized path (Cheaper/Faster for large context)
+                        # Optimized path
                         response = model.generate_content(
                             dynamic_prompt, 
                             request_options={'cached_content': cache_name}
