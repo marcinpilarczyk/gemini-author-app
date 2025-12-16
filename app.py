@@ -125,4 +125,99 @@ with tab1:
 with tab2:
     st.header("Chapter Generator")
     
-    # 1. CALCULATE CHAPTER NUMBER FIRST (Fixes the Name
+    # 1. CALCULATE CHAPTER NUMBER FIRST (Fixes the NameError)
+    chapter_num = len(st.session_state.book_history) + 1
+    st.markdown(f"**Drafting Chapter {chapter_num}**")
+    
+    # 2. AUTO-FETCH BUTTON
+    if st.button(f"🔮 Auto-Fetch Chapter {chapter_num} Plan"):
+        if not outline_text:
+            st.error("Please paste your Full Outline in the 'Bible' tab first!")
+        else:
+            with st.spinner("Scanning outline..."):
+                # Use a cheap fast model to find the outline part
+                finder_model = genai.GenerativeModel("gemini-2.0-flash-exp") 
+                finder_prompt = f"Extract plot points for Chapter {chapter_num} from:\n{outline_text}"
+                try:
+                    plan = finder_model.generate_content(finder_prompt).text
+                    st.session_state[f"plan_{chapter_num}"] = plan
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Fetch failed: {e}")
+
+    # 3. CHAPTER INSTRUCTIONS INPUT
+    default_plan = st.session_state.get(f"plan_{chapter_num}", "")
+    current_chapter_outline = st.text_area(
+        f"Specific Instructions for Chapter {chapter_num}",
+        value=default_plan,
+        height=150,
+        placeholder="Click 'Auto-Fetch' above or type instructions manually."
+    )
+    
+    # 4. GENERATE BUTTON
+    if st.button(f"Generate Chapter {chapter_num}", type="primary"):
+        if not concept_text or not outline_text or not current_chapter_outline:
+            st.error("Missing Concept, Outline, or Instructions!")
+        else:
+            with st.spinner(f"Writing Chapter {chapter_num} with {model_name}..."):
+                try:
+                    # A. Try to cache the Bible
+                    cache_name = get_or_create_cache(concept_text, outline_text)
+                    
+                    # B. Construct Prompt
+                    # If we have a cache, we ONLY send the dynamic parts
+                    dynamic_prompt = f"""
+                    ### STORY SO FAR
+                    {st.session_state.full_text}
+                    
+                    ### CHAPTER INSTRUCTIONS
+                    {current_chapter_outline}
+                    
+                    ### TASK
+                    Write Chapter {chapter_num}. Output ONLY the story text.
+                    """
+                    
+                    # C. Generate
+                    if cache_name:
+                        # Optimized path (Cheaper/Faster for large context)
+                        response = model.generate_content(
+                            dynamic_prompt, 
+                            request_options={'cached_content': cache_name}
+                        )
+                    else:
+                        # Standard path (Fallback if cache too small)
+                        full_prompt = f"### BIBLE\n{concept_text}\n### OUTLINE\n{outline_text}\n{dynamic_prompt}"
+                        response = model.generate_content(full_prompt)
+
+                    # D. Save Result
+                    generated_text = response.text
+                    st.session_state.book_history.append({
+                        "chapter": chapter_num,
+                        "content": generated_text
+                    })
+                    st.session_state.full_text += f"\n\n## Chapter {chapter_num}\n\n{generated_text}"
+                    
+                    st.success(f"Chapter {chapter_num} Complete!")
+                    st.rerun()
+                    
+                except Exception as e:
+                    st.error(f"Generation Error: {e}")
+
+    # Preview Most Recent Chapter
+    if st.session_state.book_history:
+        last_chapter = st.session_state.book_history[-1]
+        st.markdown("---")
+        st.subheader(f"Preview: Chapter {last_chapter['chapter']}")
+        st.markdown(last_chapter['content'])
+
+# --- TAB 3: READ & EXPORT ---
+with tab3:
+    st.header("The Full Manuscript")
+    st.markdown(st.session_state.full_text)
+    
+    st.download_button(
+        label="Download Book as .txt",
+        data=st.session_state.full_text,
+        file_name="my_gemini_novel.txt",
+        mime="text/plain"
+    )
