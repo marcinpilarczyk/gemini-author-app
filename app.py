@@ -11,7 +11,7 @@ st.set_page_config(page_title="Gemini Author Studio", layout="wide")
 st.title("Drafting with Gemini")
 st.markdown("Advanced Chapter Drafting using Context Caching.")
 
-# --- SAFETY SETTINGS (CRITICAL FOR HORROR/ACTION GENRES) ---
+# --- SAFETY SETTINGS (CRITICAL FOR HORROR/ACTION) ---
 # We disable safety filters so the AI can write about zombies, combat, and dark themes.
 safety_settings = {
     HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
@@ -30,6 +30,7 @@ def get_or_create_cache(bible_text, outline_text, model_name):
     # Check if cache exists and matches the current model
     if 'cache_name' in st.session_state and st.session_state.get('cache_model') == model_name:
         try:
+            # Check if valid
             cache = genai.caching.CachedContent.get(name=st.session_state.cache_name)
             cache.update(ttl=datetime.timedelta(hours=2))
             return cache.name
@@ -63,7 +64,6 @@ with st.sidebar:
     else:
         api_key = st.text_input("Enter Google API Key", type="password")
     
-    # Using generic aliases to avoid 404 errors
     model_name = st.selectbox(
         "Select Model", 
         [
@@ -93,6 +93,7 @@ if not api_key:
     st.stop()
 
 genai.configure(api_key=api_key)
+# Standard model for non-cached tasks (like Auto-Fetch)
 model = genai.GenerativeModel(model_name, safety_settings=safety_settings)
 
 # TABS
@@ -129,7 +130,7 @@ with tab2:
         
     st.markdown(f"**Drafting Chapter {chapter_num}**")
     
-    # AUTO-FETCH BUTTON (With Safety Guard)
+    # AUTO-FETCH BUTTON
     if st.button(f"🔮 Auto-Fetch Chapter {chapter_num} Plan", key="fetch_btn"):
         if not outline_text:
             st.error("Please paste your Full Outline in the 'Bible' tab first!")
@@ -138,14 +139,11 @@ with tab2:
                 try:
                     finder_prompt = f"Extract plot points for Chapter {chapter_num} from:\n{outline_text}"
                     response = model.generate_content(finder_prompt)
-                    
-                    # Robust check for empty responses
                     if response.text:
-                        plan = response.text
-                        st.session_state[f"plan_{chapter_num}"] = plan
+                        st.session_state[f"plan_{chapter_num}"] = response.text
                         st.rerun()
                     else:
-                        st.error("⚠️ The model refused to generate the plan (Likely Safety Filter). Try writing the plan manually.")
+                        st.error("⚠️ Model refused to generate plan (Safety Filter).")
                 except Exception as e:
                     st.error(f"Fetch failed: {e}")
 
@@ -153,8 +151,7 @@ with tab2:
     current_chapter_outline = st.text_area(
         f"Specific Instructions for Chapter {chapter_num}",
         value=default_plan,
-        height=150,
-        placeholder="Click 'Auto-Fetch' above or type instructions manually."
+        height=150
     )
     
     # GENERATE BUTTON
@@ -164,6 +161,7 @@ with tab2:
         else:
             with st.spinner(f"Writing Chapter {chapter_num} with {model_name}..."):
                 try:
+                    # A. Try to cache the Bible
                     cache_name = get_or_create_cache(concept_text, outline_text, model_name)
                     
                     dynamic_prompt = f"""
@@ -177,16 +175,30 @@ with tab2:
                     Write Chapter {chapter_num}. Output ONLY the story text.
                     """
                     
+                    # B. Generate
+                    response = None
+                    
+                    # 1. Cached Path (The Fix)
                     if cache_name:
-                        response = model.generate_content(
-                            dynamic_prompt, 
-                            request_options={'cached_content': cache_name}
-                        )
-                    else:
+                        try:
+                            # Retrieve the cache object
+                            cache_obj = genai.caching.CachedContent.get(name=cache_name)
+                            # Create a temporary model LINKED to this cache
+                            cached_model = genai.GenerativeModel.from_cached_content(
+                                cached_content=cache_obj,
+                                safety_settings=safety_settings # Apply safety here too!
+                            )
+                            response = cached_model.generate_content(dynamic_prompt)
+                        except Exception as e:
+                            print(f"Cache failed, falling back: {e}")
+                            cache_name = None # Trigger fallback below
+                            
+                    # 2. Standard Path (Fallback)
+                    if not cache_name:
                         full_prompt = f"### BIBLE\n{concept_text}\n### OUTLINE\n{outline_text}\n{dynamic_prompt}"
                         response = model.generate_content(full_prompt)
 
-                    # CRASH GUARD: Check if text actually exists
+                    # C. Save Result
                     if hasattr(response, 'text') and response.text:
                         generated_text = response.text
                         st.session_state.book_history.append({
@@ -197,8 +209,9 @@ with tab2:
                         st.success(f"Chapter {chapter_num} Complete!")
                         st.rerun()
                     else:
-                        st.error("⚠️ Generation Empty! The model refused this prompt. It might be too violent for the current safety filters, even with BLOCK_NONE.")
-                        st.json(response.candidates[0].safety_ratings) # Show debug info
+                        st.error("⚠️ Generation Empty! The model refused the prompt (Safety Block).")
+                        if hasattr(response, 'candidates'):
+                            st.json(response.candidates[0].safety_ratings)
                     
                 except Exception as e:
                     st.error(f"Generation Error: {e}")
