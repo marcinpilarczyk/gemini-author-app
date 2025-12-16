@@ -1,6 +1,7 @@
 import streamlit as st
 import google.generativeai as genai
 from google.generativeai import caching
+from google.generativeai.types import HarmCategory, HarmBlockThreshold
 import datetime
 import time
 
@@ -10,27 +11,33 @@ st.set_page_config(page_title="Gemini Author Studio", layout="wide")
 st.title("Drafting with Gemini")
 st.markdown("Advanced Chapter Drafting using Context Caching.")
 
+# --- SAFETY SETTINGS (CRITICAL FOR HORROR/ACTION GENRES) ---
+# We disable safety filters so the AI can write about zombies, combat, and dark themes.
+safety_settings = {
+    HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+    HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+    HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+    HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+}
+
 # --- HELPER FUNCTION: CACHING ---
 def get_or_create_cache(bible_text, outline_text, model_name):
     """
     Creates a cache for the static 'Bible' data using the ACTIVE model.
     """
-    # 1. Combine static data into one block
     static_content = f"### THE BIBLE (Static Context)\n{bible_text}\n\n### THE FULL OUTLINE\n{outline_text}"
     
-    # 2. Check if cache exists AND matches the current model
+    # Check if cache exists and matches the current model
     if 'cache_name' in st.session_state and st.session_state.get('cache_model') == model_name:
         try:
-            # Verify it's still valid
             cache = genai.caching.CachedContent.get(name=st.session_state.cache_name)
             cache.update(ttl=datetime.timedelta(hours=2))
             return cache.name
         except Exception:
             del st.session_state.cache_name
 
-    # 3. Create New Cache
+    # Create New Cache
     try:
-        # Use the EXACT model selected in the sidebar
         cache = genai.caching.CachedContent.create(
             model=model_name, 
             display_name="book_bible_v1", 
@@ -43,7 +50,6 @@ def get_or_create_cache(bible_text, outline_text, model_name):
         st.toast(f"✅ Bible Cached for {model_name}!", icon="💾")
         return cache.name
     except Exception as e:
-        # If cache fails (e.g. 404 or text too short), we return None and just use standard generation
         print(f"Cache Warning: {e}")
         return None
 
@@ -51,21 +57,20 @@ def get_or_create_cache(bible_text, outline_text, model_name):
 with st.sidebar:
     st.header("Settings")
     
-    # API Key Check
     if "GOOGLE_API_KEY" in st.secrets:
         api_key = st.secrets["GOOGLE_API_KEY"]
         st.success("✅ API Key loaded securely.")
     else:
         api_key = st.text_input("Enter Google API Key", type="password")
     
-    # Model Selection
+    # Using generic aliases to avoid 404 errors
     model_name = st.selectbox(
         "Select Model", 
         [
-            "gemini-3-pro-preview",       # Your preferred model
-            "gemini-2.0-flash-exp",       # Backup 1
-            "gemini-1.5-pro",             # Backup 2
-            "gemini-1.5-flash",           # Backup 3
+            "gemini-1.5-pro",             # Most Stable
+            "gemini-3-pro-preview",       # Smartest (Paid)
+            "gemini-2.0-flash-exp",       # Fast Experimental
+            "gemini-1.5-flash",           # Cheapest
         ]
     )
     
@@ -87,9 +92,8 @@ if not api_key:
     st.warning("Waiting for API Key...")
     st.stop()
 
-# Configure Gemini
 genai.configure(api_key=api_key)
-model = genai.GenerativeModel(model_name)
+model = genai.GenerativeModel(model_name, safety_settings=safety_settings)
 
 # TABS
 tab1, tab2, tab3 = st.tabs(["1. The Bible (Setup)", "2. Write Chapter", "3. Read Book"])
@@ -102,7 +106,7 @@ with tab1:
         concept_text = st.text_area(
             "Paste your World Rules, Characters, and Tone guide here:",
             height=400,
-            value=st.session_state.get("concept_text", ""), # Persist value
+            value=st.session_state.get("concept_text", ""), 
             key="concept_input"
         )
     with col2:
@@ -110,7 +114,7 @@ with tab1:
         outline_text = st.text_area(
             "Paste your full book outline here:",
             height=400,
-            value=st.session_state.get("outline_text", ""), # Persist value
+            value=st.session_state.get("outline_text", ""), 
             key="outline_input"
         )
 
@@ -118,7 +122,6 @@ with tab1:
 with tab2:
     st.header("Chapter Generator")
     
-    # 1. CALCULATE CHAPTER NUMBER
     if 'book_history' in st.session_state:
         chapter_num = len(st.session_state.book_history) + 1
     else:
@@ -126,23 +129,26 @@ with tab2:
         
     st.markdown(f"**Drafting Chapter {chapter_num}**")
     
-    # 2. AUTO-FETCH BUTTON (Now uses the SAME model as writing)
+    # AUTO-FETCH BUTTON (With Safety Guard)
     if st.button(f"🔮 Auto-Fetch Chapter {chapter_num} Plan", key="fetch_btn"):
         if not outline_text:
             st.error("Please paste your Full Outline in the 'Bible' tab first!")
         else:
             with st.spinner(f"Scanning outline with {model_name}..."):
                 try:
-                    # FIX: Use the 'model' object configured above (which uses sidebar selection)
-                    # This ensures we never use a hardcoded model that might 404
                     finder_prompt = f"Extract plot points for Chapter {chapter_num} from:\n{outline_text}"
-                    plan = model.generate_content(finder_prompt).text
-                    st.session_state[f"plan_{chapter_num}"] = plan
-                    st.rerun()
+                    response = model.generate_content(finder_prompt)
+                    
+                    # Robust check for empty responses
+                    if response.text:
+                        plan = response.text
+                        st.session_state[f"plan_{chapter_num}"] = plan
+                        st.rerun()
+                    else:
+                        st.error("⚠️ The model refused to generate the plan (Likely Safety Filter). Try writing the plan manually.")
                 except Exception as e:
                     st.error(f"Fetch failed: {e}")
 
-    # 3. CHAPTER INSTRUCTIONS INPUT
     default_plan = st.session_state.get(f"plan_{chapter_num}", "")
     current_chapter_outline = st.text_area(
         f"Specific Instructions for Chapter {chapter_num}",
@@ -151,17 +157,15 @@ with tab2:
         placeholder="Click 'Auto-Fetch' above or type instructions manually."
     )
     
-    # 4. GENERATE BUTTON
+    # GENERATE BUTTON
     if st.button(f"Generate Chapter {chapter_num}", type="primary", key="gen_btn"):
         if not concept_text or not outline_text or not current_chapter_outline:
             st.error("Missing Concept, Outline, or Instructions!")
         else:
             with st.spinner(f"Writing Chapter {chapter_num} with {model_name}..."):
                 try:
-                    # A. Try to cache the Bible
                     cache_name = get_or_create_cache(concept_text, outline_text, model_name)
                     
-                    # B. Construct Prompt
                     dynamic_prompt = f"""
                     ### STORY SO FAR
                     {st.session_state.full_text}
@@ -173,33 +177,32 @@ with tab2:
                     Write Chapter {chapter_num}. Output ONLY the story text.
                     """
                     
-                    # C. Generate
                     if cache_name:
-                        # Optimized path
                         response = model.generate_content(
                             dynamic_prompt, 
                             request_options={'cached_content': cache_name}
                         )
                     else:
-                        # Standard path (Fallback if cache too small)
                         full_prompt = f"### BIBLE\n{concept_text}\n### OUTLINE\n{outline_text}\n{dynamic_prompt}"
                         response = model.generate_content(full_prompt)
 
-                    # D. Save Result
-                    generated_text = response.text
-                    st.session_state.book_history.append({
-                        "chapter": chapter_num,
-                        "content": generated_text
-                    })
-                    st.session_state.full_text += f"\n\n## Chapter {chapter_num}\n\n{generated_text}"
-                    
-                    st.success(f"Chapter {chapter_num} Complete!")
-                    st.rerun()
+                    # CRASH GUARD: Check if text actually exists
+                    if hasattr(response, 'text') and response.text:
+                        generated_text = response.text
+                        st.session_state.book_history.append({
+                            "chapter": chapter_num,
+                            "content": generated_text
+                        })
+                        st.session_state.full_text += f"\n\n## Chapter {chapter_num}\n\n{generated_text}"
+                        st.success(f"Chapter {chapter_num} Complete!")
+                        st.rerun()
+                    else:
+                        st.error("⚠️ Generation Empty! The model refused this prompt. It might be too violent for the current safety filters, even with BLOCK_NONE.")
+                        st.json(response.candidates[0].safety_ratings) # Show debug info
                     
                 except Exception as e:
                     st.error(f"Generation Error: {e}")
 
-    # Preview Most Recent Chapter
     if st.session_state.book_history:
         last_chapter = st.session_state.book_history[-1]
         st.markdown("---")
