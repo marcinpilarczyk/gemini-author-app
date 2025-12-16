@@ -5,6 +5,8 @@ from google.generativeai.types import HarmCategory, HarmBlockThreshold
 import datetime
 import re
 import sqlite3
+from docx import Document
+from io import BytesIO
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(page_title="Gemini 3 Author Studio (Persistent)", layout="wide")
@@ -93,6 +95,46 @@ def clean_text_formatting(text):
     text = re.sub(r'\n\s*\n', '\n\n', text) 
     return text.strip()
 
+# --- HELPER: DOCX BUILDER ---
+def create_docx(full_text, title="My Novel"):
+    doc = Document()
+    doc.add_heading(title, 0)
+
+    # Split into lines to process them one by one
+    lines = full_text.split('\n')
+    
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue # Skip empty lines to let Word handle spacing via styles
+            
+        # Detect Headers
+        if line.startswith("## Chapter"):
+            clean_header = line.replace("## ", "").strip()
+            doc.add_heading(clean_header, level=1)
+        elif line.startswith("## "):
+            clean_header = line.replace("## ", "").strip()
+            doc.add_heading(clean_header, level=2)
+        else:
+            # Create a standard paragraph
+            p = doc.add_paragraph()
+            
+            # PARSE MARKDOWN ITALICS: *text*
+            # We split by the asterisks to separate normal text from italic text
+            # Regex captures the delimiters so we don't lose them
+            parts = re.split(r'(\*[^*]+\*)', line)
+            
+            for part in parts:
+                if part.startswith('*') and part.endswith('*') and len(part) > 2:
+                    # Italic content (remove stars, apply style)
+                    clean_part = part[1:-1]
+                    run = p.add_run(clean_part)
+                    run.italic = True
+                else:
+                    # Normal content
+                    p.add_run(part)
+    return doc
+
 # --- CACHING ---
 def get_or_create_cache(bible_text, outline_text):
     static_content = f"### THE BIBLE (Static Context)\n{bible_text}\n\n### THE FULL OUTLINE\n{outline_text}"
@@ -134,17 +176,14 @@ with st.sidebar:
                 c.execute("DELETE FROM chapters")
                 
                 # 2. Advanced Split: FIX APPLIED HERE
-                # We moved (?i) to the start of the pattern: r'(?i)(chapter\s+\d+)'
                 chunks = re.split(r'(?i)(chapter\s+\d+)', import_text)
                 
                 current_chapter_num = 0
                 current_content = ""
                 
                 for chunk in chunks:
-                    # If this chunk is a header (e.g., "Chapter 1")
                     if re.match(r'(?i)chapter\s+\d+', chunk.strip()):
-                        
-                        # SAVE PREVIOUS CHAPTER (if exists)
+                        # SAVE PREVIOUS CHAPTER
                         if current_chapter_num > 0:
                             clean_content = clean_text_formatting(current_content)
                             if clean_content:
@@ -153,13 +192,11 @@ with st.sidebar:
                         
                         # START NEW CHAPTER
                         current_chapter_num += 1
-                        current_content = "" # Reset buffer
-                        
+                        current_content = "" 
                     else:
-                        # Add content to buffer
                         current_content += chunk
 
-                # SAVE THE FINAL CHAPTER
+                # SAVE FINAL CHAPTER
                 if current_chapter_num > 0:
                     clean_content = clean_text_formatting(current_content)
                     if clean_content:
@@ -182,7 +219,6 @@ if "editor_mode" not in st.session_state: st.session_state.editor_mode = False
 # LOAD DATA FROM DB
 bible_data, chapter_data = load_from_db()
 
-# Rebuild Session State from DB
 current_concept = bible_data['concept'] if bible_data else ""
 current_outline = bible_data['outline'] if bible_data else ""
 full_text_history = ""
@@ -202,7 +238,7 @@ model = genai.GenerativeModel(MODEL_NAME, safety_settings=safety_settings)
 
 tab1, tab2, tab3 = st.tabs(["1. The Bible", "2. Writer", "3. Full Book"])
 
-# TAB 1: BIBLE (Auto-Saves)
+# TAB 1: BIBLE
 with tab1:
     col1, col2 = st.columns(2)
     with col1:
@@ -268,7 +304,6 @@ with tab2:
                         response = model.generate_content(f"{new_concept}\n{new_outline}\n{dynamic_prompt}")
 
                     if response.text:
-                        # Clean BEFORE entering editor
                         st.session_state.editor_content = clean_text_formatting(response.text)
                         st.session_state.editor_mode = True
                         st.rerun()
@@ -307,9 +342,10 @@ with tab2:
         st.caption(f"Last Saved: Chapter {last['chapter']}")
         st.text_area("Preview", value=last['content'], height=200, disabled=True)
 
-# TAB 3: EXPORT
+# TAB 3: EXPORT (With DOCX Fix)
 with tab3:
     st.header("The Full Manuscript")
+    st.write("Use the **Word Doc** button below to preserve Italics for Atticus/Vellum.")
     
     col_tools1, col_tools2 = st.columns(2)
     with col_tools1:
@@ -317,10 +353,20 @@ with tab3:
             full_text_history = clean_text_formatting(full_text_history)
             st.rerun()
     with col_tools2:
-        if st.button("📏 Single Spaced Export"):
-            st.session_state.export_text = re.sub(r'\n+', '\n', full_text_history)
-        else:
-            st.session_state.export_text = full_text_history
+        if st.button("📄 Prepare Word Doc (Preserves Italics)"):
+            # Generate the doc object
+            doc = create_docx(full_text_history)
+            
+            # Save to memory buffer
+            buffer = BytesIO()
+            doc.save(buffer)
+            buffer.seek(0)
+            
+            st.download_button(
+                label="⬇️ Download .docx (Atticus Ready)",
+                data=buffer,
+                file_name="my_novel.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            )
 
-    st.text_area("Full Book", value=st.session_state.export_text, height=600)
-    st.download_button("Download .txt", st.session_state.export_text, "my_book.txt")
+    st.text_area("Plain Text Preview", value=full_text_history, height=600)
