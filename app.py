@@ -12,11 +12,9 @@ st.title("Drafting with Gemini 3 Pro")
 st.markdown("Advanced Chapter Drafting with **Edit Mode** & **Context Caching**.")
 
 # --- HARDCODED MODEL ---
-# We are committing to the best model.
 MODEL_NAME = "gemini-3-pro-preview"
 
 # --- SAFETY SETTINGS ---
-# "Unshackled" mode for horror/action writing
 safety_settings = {
     HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
     HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
@@ -92,7 +90,6 @@ if "book_history" not in st.session_state:
     st.session_state.book_history = [] 
 if "full_text" not in st.session_state:
     st.session_state.full_text = ""
-# The Staging Area for the "Editor"
 if "temp_generated_chapter" not in st.session_state:
     st.session_state.temp_generated_chapter = None
 
@@ -143,7 +140,6 @@ with tab2:
     chapter_instructions = st.text_area("Chapter Instructions:", value=current_plan, height=150)
 
     # 4. GENERATION ACTION
-    # Only show "Generate" if we are NOT currently editing a draft
     if st.session_state.temp_generated_chapter is None:
         if st.button(f"🚀 Generate Chapter {next_chap_num}", type="primary"):
             with st.spinner("Gemini 3 is writing..."):
@@ -159,6 +155,7 @@ with tab2:
                     
                     ### TASK
                     Write Chapter {next_chap_num}. Output ONLY the story text.
+                    **FORMATTING RULE:** Use '***' on a separate line to indicate scene breaks.
                     """
                     
                     response = None
@@ -180,8 +177,11 @@ with tab2:
                         response = model.generate_content(full_prompt)
 
                     if hasattr(response, 'text') and response.text:
-                        # CRITICAL CHANGE: Don't save yet! Put in staging area.
-                        st.session_state.temp_generated_chapter = response.text
+                        # FIX: Auto-Clean the text BEFORE showing it in the editor
+                        clean_text = re.sub(r'\n{3,}', '\n\n', response.text)
+                        clean_text = clean_text.strip() # Remove start/end spaces
+                        
+                        st.session_state.temp_generated_chapter = clean_text
                         st.rerun()
                     else:
                         st.error("Empty response (Safety Blocked).")
@@ -189,10 +189,16 @@ with tab2:
                 except Exception as e:
                     st.error(f"Error: {e}")
 
-    # 5. THE EDITING STAGE (Only visible when we have a draft)
+    # 5. THE EDITING STAGE
     else:
         st.info("📝 **Edit Mode Active** - Review and polish before saving.")
         
+        # UTILITY BUTTON FOR MANUAL CLEANING
+        if st.button("🧹 Clean Extra Spaces (Editor)", help="Click if you see big gaps in the text box below"):
+            current_draft = st.session_state.temp_generated_chapter
+            st.session_state.temp_generated_chapter = re.sub(r'\n{3,}', '\n\n', current_draft).strip()
+            st.rerun()
+
         # The Editor
         edited_text = st.text_area(
             f"Editing Chapter {next_chap_num}...", 
@@ -204,14 +210,12 @@ with tab2:
         
         with col_save:
             if st.button("💾 Confirm & Add to Book", type="primary"):
-                # Commit the EDITED text to history
                 st.session_state.book_history.append({
                     "chapter": next_chap_num,
                     "content": edited_text
                 })
                 st.session_state.full_text += f"\n\n## Chapter {next_chap_num}\n\n{edited_text}"
                 
-                # Clear staging
                 st.session_state.temp_generated_chapter = None
                 st.success("Chapter Saved!")
                 st.rerun()
@@ -221,7 +225,7 @@ with tab2:
                 st.session_state.temp_generated_chapter = None
                 st.rerun()
 
-    # 6. HISTORY PREVIEW (Below the active workspace)
+    # 6. HISTORY PREVIEW
     if st.session_state.book_history and st.session_state.temp_generated_chapter is None:
         st.divider()
         last = st.session_state.book_history[-1]
@@ -233,11 +237,18 @@ with tab3:
     st.header("The Manuscript")
     
     # Repair Tools
-    if st.button("🧹 Fix Formatting (Remove Extra Lines)"):
-        st.session_state.full_text = re.sub(r'\n{3,}', '\n\n', st.session_state.full_text)
-        st.rerun()
+    col_tools1, col_tools2 = st.columns(2)
+    with col_tools1:
+        if st.button("🧹 Fix Formatting (Remove Extra Lines)"):
+            st.session_state.full_text = re.sub(r'\n{3,}', '\n\n', st.session_state.full_text)
+            st.rerun()
+            
+    with col_tools2:
+        if st.button("📏 Single Spaced Mode"):
+            st.session_state.full_text = re.sub(r'\n+', '\n', st.session_state.full_text)
+            st.rerun()
 
-    st.text_area("Full Text", value=st.session_state.full_text, height=600)
+    st.text_area("Full Text (Ctrl+A to Copy)", value=st.session_state.full_text, height=600)
     
     st.download_button(
         "Download .txt", 
