@@ -444,4 +444,68 @@ with tab4:
                 st.error(f"Analysis Failed: {e}")
 
     # --- INPUTS (Now Auto-Filled) ---
-    col1, col
+    col1, col2 = st.columns(2)
+    with col1:
+        # Title usually comes from Concept, or user types it
+        def_title = current_concept.split('\n')[0] if current_concept else ""
+        pub_title = st.text_input("Book Title", value=def_title)
+        
+        # Genre (Auto-filled via session state)
+        pub_genre = st.text_input("Sub-Genre", key="pub_genre")
+        
+    with col2:
+        # Tropes (Auto-filled via session state)
+        pub_tropes = st.text_input("Core Tropes", key="pub_tropes")
+        
+        # Tone (Auto-filled via session state - we map text back to slider if possible, or just default)
+        tone_opts = ["Dark", "Serious", "Balanced", "Hopeful", "Humorous"]
+        # Simple fuzzy match for default index
+        def_index = 1
+        if st.session_state.pub_tone:
+            for i, t in enumerate(tone_opts):
+                if t.lower() in st.session_state.pub_tone.lower():
+                    def_index = i
+                    break
+        pub_tone = st.select_slider("Tone", tone_opts, value=tone_opts[def_index])
+
+    # --- GENERATE PACKAGE ---
+    if st.button("⚡ Generate Marketing Package"):
+        if not full_text_history:
+            st.error("Please write some chapters first!")
+        else:
+            with st.spinner("Engineering metadata..."):
+                marketing_prompt = f"""
+                You are an expert KDP Marketer. Optimize metadata for Amazon A9 & Rufus.
+
+                ### INPUT DATA
+                **Title:** {pub_title}
+                **Genre:** {pub_genre}
+                **Tropes:** {pub_tropes}
+                **Tone:** {pub_tone}
+                **Sample:** {full_text_history[:5000]}
+
+                ### TASK 1: SEMANTIC KEYWORDS (7 SLOTS)
+                Generate 7 backend KDP keyword phrases (max 50 chars each).
+                Focus on Latent Intent and "Vibe".
+
+                ### TASK 2: THE HYBRID BLURB
+                Write a blurb strictly following this structure:
+                1. **The Hook (Mobile Fold):** 1-2 sentences. Primary Keyword + Emotional Hook.
+                2. **The Context:** 2-3 sentences. Stakes + LSI Keywords.
+                3. **The Character Arc:** 2 sentences. Pure emotion.
+                4. **The Selling Paragraph:** Punchy list of tropes/"Perfect for fans of".
+
+                Constraint: Keyword density max 3%.
+                """
+                try:
+                    pub_model = genai.GenerativeModel("gemini-1.5-pro")
+                    response = pub_model.generate_content(marketing_prompt)
+                    st.session_state.marketing_result = response.text
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error: {e}")
+
+    if "marketing_result" in st.session_state:
+        st.divider()
+        st.subheader("📦 Your Marketing Package")
+        st.text_area("Result", value=st.session_state.marketing_result, height=600)
