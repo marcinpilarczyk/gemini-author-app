@@ -305,10 +305,12 @@ current_outline = active_book['outline']
 full_text = ""
 rolling_sum = ""
 last_raw = ""
-hist = []
+history_list = []
+existing_chapters = {}
 
 for r in chapter_data:
-    hist.append(r)
+    history_list.append(r)
+    existing_chapters[r['chapter_num']] = r['content']
     full_text += f"\n\n## Chapter {r['chapter_num']}\n\n{r['content']}"
     if r['summary']: rolling_sum += f"\n\n**Ch {r['chapter_num']}:**\n{r['summary']}"
     last_raw = r['content']
@@ -329,12 +331,36 @@ with t1:
             update_book_meta(st.session_state.active_book_id, nti, nc, no)
             st.rerun()
 
+# TAB 2: WRITER (UPDATED WITH SELECTOR)
 with t2:
-    nxt = len(hist)+1
-    st.header(f"Chapter {nxt}")
-    if st.button(f"🔮 Fetch"):
+    # 1. CHAPTER SELECTOR
+    default_next = len(history_list) + 1
+    
+    # We use a session state key for the number input to keep it persistent
+    if "selected_chap" not in st.session_state:
+        st.session_state.selected_chap = default_next
+        
+    c_sel1, c_sel2 = st.columns([1, 4])
+    with c_sel1:
+        chap_num = st.number_input("Chapter #", min_value=1, value=st.session_state.selected_chap, step=1)
+        st.session_state.selected_chap = chap_num
+    with c_sel2:
+        st.write("")
+        st.write("")
+        # If chapter exists, show LOAD button
+        if chap_num in existing_chapters and not st.session_state.editor_mode:
+            if st.button(f"✏️ Load Chapter {chap_num} for Editing"):
+                st.session_state.ed_con = existing_chapters[chap_num]
+                st.session_state.editor_mode = True
+                st.rerun()
+    
+    st.divider()
+
+    # 2. AUTO-FETCH & PLANNING
+    # Only show auto-fetch if we are NOT in editor mode (or if we want to overwrite)
+    if st.button(f"🔮 Auto-Fetch Plan for Ch {chap_num}"):
         with st.spinner("Fetching..."):
-            p = f"Access Outline. Copy section for **Chapter {nxt}** VERBATIM."
+            p = f"Access Outline. Copy section for **Chapter {chap_num}** VERBATIM. Do not summarize."
             try:
                 cn = get_or_create_cache(nc, no)
                 if cn:
@@ -342,19 +368,22 @@ with t2:
                     cm = genai.GenerativeModel.from_cached_content(cached_content=co)
                     res = cm.generate_content(p)
                 else: res = model.generate_content(f"{no}\n\n{p}")
-                st.session_state[f"pl_{nxt}"] = res.text
+                st.session_state[f"pl_{chap_num}"] = res.text
                 st.rerun()
             except: st.error("Error")
     
-    cp = st.session_state.get(f"pl_{nxt}", "")
-    ci = st.text_area("Plan", value=cp, height=150)
+    cp = st.session_state.get(f"pl_{chap_num}", "")
+    ci = st.text_area("Chapter Plan / Instructions", value=cp, height=150)
 
+    # 3. GENERATION / EDITOR
     if not st.session_state.editor_mode:
-        if st.button(f"🚀 Write"):
+        btn_label = f"🚀 Write Chapter {chap_num}" if chap_num not in existing_chapters else f"🔄 Re-Write Chapter {chap_num} (Overwrites Existing)"
+        
+        if st.button(btn_label, type="primary"):
             with st.spinner("Writing..."):
                 cn = get_or_create_cache(nc, no)
                 ctx = f"### LEDGER\n{rolling_sum}\n### PREV TEXT\n...{last_raw[-3000:] if last_raw else 'Start.'}"
-                dp = f"### CONTEXT\n{ctx}\n### PLAN\n{ci}\n### TASK\nWrite Ch {nxt}. Use '***' breaks."
+                dp = f"### CONTEXT\n{ctx}\n### PLAN\n{ci}\n### TASK\nWrite Ch {chap_num}. Use '***' breaks."
                 try:
                     if cn:
                         co = genai.caching.CachedContent.get(name=cn)
@@ -367,7 +396,7 @@ with t2:
                         st.rerun()
                 except: st.error("Error")
     else:
-        st.info("Editing")
+        st.info(f"📝 Editing Chapter {chap_num}")
         st.caption(f"Words: {len(st.session_state.ed_con.split())}")
         cm1, cm2 = st.columns([1,1])
         with cm1: sp = st.radio("Spacing", ["Standard", "Tight"], horizontal=True)
@@ -383,9 +412,10 @@ with t2:
             if st.button("💾 Save"):
                 with st.spinner("Saving..."):
                     sm = generate_summary(et)
-                    save_chapter(st.session_state.active_book_id, nxt, et, sm)
+                    save_chapter(st.session_state.active_book_id, chap_num, et, sm)
                     st.session_state.editor_mode = False
                     del st.session_state.ed_con
+                    st.success(f"Chapter {chap_num} Saved!")
                     st.rerun()
         with c2:
             if st.button("❌ Discard"):
@@ -393,9 +423,9 @@ with t2:
                 del st.session_state.ed_con
                 st.rerun()
 
-    if hist and not st.session_state.editor_mode:
+    if history_list and not st.session_state.editor_mode:
         st.divider()
-        if st.button("Undo"):
+        if st.button("Undo Last Added Chapter"):
             delete_last_chapter(st.session_state.active_book_id, len(hist))
             st.rerun()
         l = hist[-1]
@@ -452,7 +482,6 @@ with t4:
     if "mres" in st.session_state:
         st.divider(); st.text_area("Result", value=st.session_state.mres, height=600)
 
-# --- TAB 5: EDITOR (NEW) ---
 with t5:
     st.header("🧐 The Continuity Editor")
     st.markdown("Scans the entire manuscript for inconsistencies, timeline errors, and plot holes.")
@@ -490,7 +519,6 @@ with t5:
                 """
                 
                 try:
-                    # Using caching to handle massive context
                     cache_name = get_or_create_cache(current_concept, current_outline)
                     if cache_name:
                         c_obj = genai.caching.CachedContent.get(name=cache_name)
