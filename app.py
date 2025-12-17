@@ -9,7 +9,7 @@ from docx import Document
 from io import BytesIO
 
 # --- PAGE CONFIGURATION ---
-st.set_page_config(page_title="Gemini 3 Author Studio (Persistent)", layout="wide")
+st.set_page_config(page_title="Gemini 3 Author Studio", layout="wide")
 st.title("Drafting with Gemini 3 Pro (Auto-Save + Rolling Memory)")
 
 # --- DATABASE SETUP ---
@@ -395,63 +395,53 @@ with tab3:
 # --- TAB 4: PUBLISHER (MARKETING AGENT) ---
 with tab4:
     st.header("🚀 The Algorithmic Publisher")
-    st.markdown("""
-    **Methodology:** Based on *The Algorithmic Copywriter* (Rufus/A9 Optimized).
-    This tool generates **Semantic Keywords** and a **Hybrid Blurb** designed to satisfy both the Robot (Indexing) and the Human (Ranking).
-    """)
+    st.markdown("Based on *The Algorithmic Copywriter* (Rufus/A9 Optimized).")
     
-    col1, col2 = st.columns(2)
-    with col1:
-        pub_title = st.text_input("Book Title", value=bible_data['concept'].split('\n')[0] if bible_data and bible_data['concept'] else "")
-        pub_genre = st.text_input("Sub-Genre (Specific)", placeholder="e.g. Military Sci-Fi, Dark Academia")
-    with col2:
-        pub_tropes = st.text_input("Core Tropes", placeholder="e.g. Enemies to Lovers, Forced Proximity, The Chosen One")
-        pub_tone = st.select_slider("Tone", ["Dark/Gritty", "Serious", "Balanced", "Hopeful", "Humorous"])
+    # Initialize Session Keys if they don't exist
+    if "pub_genre" not in st.session_state: st.session_state.pub_genre = ""
+    if "pub_tropes" not in st.session_state: st.session_state.pub_tropes = ""
+    if "pub_tone" not in st.session_state: st.session_state.pub_tone = "Serious"
 
-    if st.button("⚡ Generate Marketing Package"):
-        if not full_text_history:
-            st.error("Please write some chapters first so I can analyze the text!")
-        else:
-            with st.spinner("Analyzing text vectors & engineering metadata..."):
-                # We analyze the actual book text + the user inputs
-                marketing_prompt = f"""
-                You are an expert KDP Marketer & Algorithmic Copywriter. 
-                Your goal is to optimize metadata for Amazon's A9 algorithm and Rufus AI.
-
-                ### INPUT DATA
-                **Title:** {pub_title}
-                **Genre:** {pub_genre}
-                **Tropes:** {pub_tropes}
-                **Tone:** {pub_tone}
-                **Book Sample (First 5000 chars):**
-                {full_text_history[:5000]}
-
-                ### TASK 1: SEMANTIC KEYWORDS (7 SLOTS)
-                Generate 7 backend KDP keyword phrases (max 50 chars each).
-                **RULES:**
-                - Do NOT use single words. Use "Semantic Phrases" that capture user intent (Latent Intent).
-                - Focus on "Vibe", "Outcome", and "Specific Sub-Genre".
-                - Example: Instead of "Romance", use "Enemies to lovers clean romance office".
-
-                ### TASK 2: THE HYBRID BLURB
-                Write a blurb following this strict 4-part structure:
-                1. **The Hook (The Mobile Fold):** 1-2 sentences. MUST contain the Primary Category Keyword + Emotional Hook.
-                2. **The Context (The World):** 2-3 sentences. Establish stakes and weave in Secondary (LSI) Keywords (e.g., "Galactic Empire", "Neon-soaked").
-                3. **The Character Arc (The Heart):** 2 sentences focused on pure emotion/empathy.
-                4. **The Selling Paragraph (The Click):** A punchy list of tropes or "Perfect for fans of..." to trigger the Hunter.
-
-                **Constraint:** Keyword density max 3%. Weave keywords naturally (Semantic Weaving).
-                """
+    # --- AUTO-DETECT BUTTON ---
+    if st.button("🧬 Auto-Analyze Book DNA (Extract Genre & Tropes)"):
+        with st.spinner("Reading Bible & Summaries..."):
+            dna_prompt = f"""
+            Analyze the following Book Bible and Chapter Summaries.
+            
+            ### BIBLE
+            {current_concept}
+            {current_outline}
+            
+            ### SUMMARIES
+            {rolling_summary_context}
+            
+            ### TASK
+            Identify the following for a KDP marketing campaign:
+            1. **Sub-Genre:** Specific commercial sub-genre (e.g., "Military Sci-Fi", "Regency Romance").
+            2. **Core Tropes:** Top 5 tropes comma-separated (e.g., "Enemies to lovers, forced proximity").
+            3. **Tone:** One word (Dark, Serious, Balanced, Hopeful, Humorous).
+            
+            Output strictly in this format:
+            GENRE: [Genre]
+            TROPES: [Tropes]
+            TONE: [Tone]
+            """
+            try:
+                dna_model = genai.GenerativeModel("gemini-1.5-pro")
+                res = dna_model.generate_content(dna_prompt).text
                 
-                try:
-                    pub_model = genai.GenerativeModel("gemini-1.5-pro") # Use Pro for better marketing logic
-                    response = pub_model.generate_content(marketing_prompt)
-                    st.session_state.marketing_result = response.text
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Marketing Agent Error: {e}")
+                # Parse
+                g = res.split("GENRE:")[1].split("TROPES:")[0].strip()
+                tr = res.split("TROPES:")[1].split("TONE:")[0].strip()
+                to = res.split("TONE:")[1].strip()
+                
+                st.session_state.pub_genre = g
+                st.session_state.pub_tropes = tr
+                st.session_state.pub_tone = to
+                st.success("DNA Extracted!")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Analysis Failed: {e}")
 
-    if "marketing_result" in st.session_state:
-        st.divider()
-        st.subheader("📦 Your Marketing Package")
-        st.text_area("Copy/Paste Result", value=st.session_state.marketing_result, height=600)
+    # --- INPUTS (Now Auto-Filled) ---
+    col1, col
