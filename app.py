@@ -99,7 +99,6 @@ def load_active_book(book_id):
     conn.close()
     return book, chapters
 
-# --- CRITICAL FIX: Missing function added here ---
 def get_chapters(book_id):
     conn = sqlite3.connect(DB_NAME)
     conn.row_factory = sqlite3.Row
@@ -108,7 +107,6 @@ def get_chapters(book_id):
     chapters = c.fetchall()
     conn.close()
     return chapters
-# -------------------------------------------------
 
 def update_book_meta(book_id, title, concept, outline):
     conn = sqlite3.connect(DB_NAME)
@@ -151,7 +149,7 @@ def reset_db():
 init_db()
 
 # --- HARDCODED ENGINE ---
-MODEL_NAME = "gemini-1.5-pro-latest" # Standard stable model name
+MODEL_NAME = "gemini-1.5-pro-latest"
 
 safety_settings = {
     HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
@@ -177,6 +175,7 @@ def normalize_text(text, mode="standard"):
     if mode == "tight": return '\n'.join(clean_paragraphs)
     else: return '\n\n'.join(clean_paragraphs)
 
+# --- UPDATED EXPORT FUNCTION: Handles Bold (**) and Italics (*) ---
 def create_docx(full_text, title):
     doc = Document()
     doc.add_heading(title, 0)
@@ -184,17 +183,25 @@ def create_docx(full_text, title):
     paragraphs = normalized.split('\n\n')
     for p_text in paragraphs:
         if not p_text.strip(): continue
+        # Handle Headers
         if p_text.startswith("## Chapter"):
             doc.add_heading(p_text.replace("## ", "").strip(), level=1)
         elif p_text.startswith("## "):
             doc.add_heading(p_text.replace("## ", "").strip(), level=2)
         else:
             p = doc.add_paragraph()
-            parts = re.split(r'(\*[^*]+\*)', p_text)
+            # Split by Bold (**) OR Italic (*) markers
+            # Regex: Finds **bold** OR *italics*
+            parts = re.split(r'(\*\*[^*]+\*\*|\*[^*]+\*)', p_text)
             for part in parts:
-                if part.startswith('*') and part.endswith('*') and len(part) > 2:
-                    p.add_run(part[1:-1]).italic = True
-                else: p.add_run(part)
+                if part.startswith('**') and part.endswith('**') and len(part) > 4:
+                    run = p.add_run(part[2:-2])
+                    run.bold = True
+                elif part.startswith('*') and part.endswith('*') and len(part) > 2:
+                    run = p.add_run(part[1:-1])
+                    run.italic = True
+                else:
+                    p.add_run(part)
     return doc
 
 def get_or_create_cache(bible_text, outline_text):
@@ -408,7 +415,7 @@ with t2:
                         st.rerun()
                 except: st.error("Error")
     else:
-        # EDITOR MODE
+        # EDITOR MODE - NOW WITH PREVIEW TAB
         st.info(f"📝 Editing Chapter {chap_num}")
         st.caption(f"Words: {len(st.session_state.ed_con.split())}")
         cm1, cm2 = st.columns([1,1])
@@ -419,7 +426,14 @@ with t2:
                 m = "tight" if "Tight" in sp else "standard"
                 st.session_state.ed_con = normalize_text(st.session_state.ed_con, m)
                 st.rerun()
-        et = st.text_area("Editor", height=600, key="ed_con")
+        
+        # Split Editor into Edit vs Preview
+        tab_edit, tab_prev = st.tabs(["✍️ Edit", "👁️ Preview"])
+        with tab_edit:
+            et = st.text_area("Content", height=600, key="ed_con", label_visibility="collapsed")
+        with tab_prev:
+            st.markdown(st.session_state.ed_con)
+
         c1, c2 = st.columns([1,4])
         with c1:
             if st.button("💾 Save"):
@@ -438,19 +452,17 @@ with t2:
 
     if history_list and not st.session_state.editor_mode:
         st.divider()
-        # Fetch the chapters so 'hist' is defined and valid
         hist = get_chapters(st.session_state.active_book_id) 
 
         if st.button("Undo Last Added Chapter"):
             delete_last_chapter(st.session_state.active_book_id, len(hist))
             st.rerun()
 
-        # Only try to show the last chapter if 'hist' is not empty
         if hist:
             l = hist[-1]
             with st.expander(f"Ch {l['chapter_num']} View"):
                 st.info(l['summary'])
-                st.text_area("Read", value=l['content'], height=200, disabled=True)
+                st.markdown(l['content']) # Shows MD in History view too
 
 # TAB 3: MANUSCRIPT
 with t3:
@@ -468,7 +480,13 @@ with t3:
             d = create_docx(full_text, current_title)
             b = BytesIO(); d.save(b); b.seek(0)
             st.download_button("Download", b, f"{current_title}.docx")
-    st.text_area("Full Text", value=full_text, height=600)
+    
+    # SPLIT VIEW: Formatted vs Raw
+    mt1, mt2 = st.tabs(["📖 Reading View", "📝 Copy/Raw Text"])
+    with mt1:
+        st.markdown(full_text)
+    with mt2:
+        st.text_area("Full Text", value=full_text, height=600, label_visibility="collapsed")
 
 # TAB 4: PUBLISHER
 with t4:
@@ -508,7 +526,6 @@ with t5:
     st.header("🧐 The Continuity Editor")
     st.markdown("Scans the entire manuscript for inconsistencies, timeline errors, and plot holes.")
     
-    # CRITICAL FIX: Increased max tokens and slightly raised temperature
     strict_config = genai.types.GenerationConfig(
         temperature=0.2,            
         top_p=0.95,
@@ -561,7 +578,6 @@ with t5:
                     else:
                         response = model.generate_content(editor_prompt, generation_config=strict_config)
                         
-                    # CRITICAL FIX: Graceful handling of empty responses
                     if response.text:
                         st.session_state.editor_report = response.text
                         st.rerun()
