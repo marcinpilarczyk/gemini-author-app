@@ -508,53 +508,70 @@ with t5:
     st.header("🧐 The Continuity Editor")
     st.markdown("Scans the entire manuscript for inconsistencies, timeline errors, and plot holes.")
     
+    # 1. Add a configuration for "Zero Creativity" (High Precision)
+    strict_config = genai.types.GenerationConfig(
+        temperature=0.0,             # 0.0 means "don't guess, only use facts"
+        top_p=1.0,
+        max_output_tokens=4000
+    )
+
     if st.button("🔍 Run Full Manuscript Scan"):
         if not full_text or len(full_text) < 1000:
             st.error("Manuscript too short to scan.")
         else:
             with st.spinner("Reading full text and checking against Bible..."):
+                # 2. Updated Prompt: Demands "Quotes" as proof
                 editor_prompt = f"""
-                You are a ruthless Continuity Editor.
+                You are a ruthless Continuity Editor. You do not write; you only check logic.
                 
-                ### THE BIBLE (TRUTH)
+                ### THE BIBLE (RULES)
                 {current_concept}
                 {current_outline}
                 
-                ### THE MANUSCRIPT
+                ### THE MANUSCRIPT (TEXT)
                 {full_text}
                 
                 ### TASK
-                Analyze the manuscript for inconsistencies. Look for:
+                Analyze the manuscript for inconsistencies. 
+                CRITICAL RULE: You must QUOTE the exact sentence from the text that proves the error. 
+                If you cannot find a direct quote to support the error, DO NOT report it.
+                
+                Look for:
                 1. **Character Errors**: Dead people reappearing, eye color changing, names swapping.
                 2. **Timeline Errors**: Impossible travel times, day/night confusion.
-                3. **Item/Inventory Errors**: Using weapons they lost, having items they never picked up.
-                4. **Bible Contradictions**: Plot points that violate the outline rules.
+                3. **Bible Contradictions**: Plot points that violate the outline rules.
                 
                 ### OUTPUT FORMAT
+                If no errors are found, write "NO CRITICAL ERRORS FOUND."
+                
                 **Severity 1 (Critical Logic Breaks):**
-                - [Chapter X]: Error details...
+                - [Chapter X]: [Error Summary]
+                  *Evidence:* "[Quote from text showing the error]"
                 
                 **Severity 2 (Minor Inconsistencies):**
-                - [Chapter X]: Error details...
-                
-                **Verdict:** [Pass/Fail]
+                - [Chapter X]: [Error Summary]
+                  *Evidence:* "[Quote from text]"
                 """
                 
                 try:
+                    # Check if we are using a cached bible context (faster/cheaper)
                     cache_name = get_or_create_cache(current_concept, current_outline)
                     if cache_name:
                         c_obj = genai.caching.CachedContent.get(name=cache_name)
                         c_model = genai.GenerativeModel.from_cached_content(cached_content=c_obj)
-                        res = c_model.generate_content(editor_prompt)
+                        # Pass the strict_config here
+                        res = c_model.generate_content(editor_prompt, generation_config=strict_config)
                     else:
-                        res = model.generate_content(editor_prompt)
+                        # Pass the strict_config here
+                        res = model.generate_content(editor_prompt, generation_config=strict_config)
                         
                     st.session_state.editor_report = res.text
                     st.rerun()
                 except Exception as e:
-                    st.error(f"Scan failed (Book might be too large for one prompt): {e}")
+                    st.error(f"Scan failed: {e}")
 
     if "editor_report" in st.session_state:
         st.divider()
         st.subheader("📋 Editor Report")
         st.markdown(st.session_state.editor_report)
+
