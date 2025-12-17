@@ -82,40 +82,49 @@ safety_settings = {
     HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
 }
 
-# --- HELPER: "STRIP & REBUILD" TEXT CLEANER (The Fix) ---
-def clean_text_formatting(text):
+# --- HELPER: NUCLEAR TEXT NORMALIZER ---
+def normalize_text(text, mode="standard"):
     """
-    Splits text into lines, removes ALL whitespace-only lines,
-    and rejoins them with exactly one blank line (Markdown standard).
+    Splits text by ANY vertical gap (one newline, two newlines, spaces on lines, etc.)
+    and rebuilds it cleanly.
     """
     if not text: return ""
     
-    # 1. Split into individual lines
-    lines = text.split('\n')
+    # 1. Normalize line endings to Unix style
+    text = text.replace('\r\n', '\n').replace('\r', '\n')
     
-    # 2. Strip whitespace from every line & discard empty ones
-    clean_lines = [line.strip() for line in lines if line.strip()]
+    # 2. Split by 2+ newlines (paragraph breaks) to isolate paragraphs
+    #    The regex \n\s*\n matches a newline, any whitespace (including empty lines), and another newline.
+    paragraphs = re.split(r'\n\s*\n', text)
     
-    # 3. Join back together with exactly two newlines (Markdown paragraph break)
-    # If you prefer TIGHTER text (no blank line), change '\n\n' to '\n' below.
-    return '\n\n'.join(clean_lines)
+    # 3. Clean each paragraph (strip surrounding whitespace)
+    clean_paragraphs = [p.strip() for p in paragraphs if p.strip()]
+    
+    # 4. Rejoin based on mode
+    if mode == "tight":
+        return '\n'.join(clean_paragraphs) # Single spacing
+    else:
+        return '\n\n'.join(clean_paragraphs) # Standard paragraph spacing
 
 # --- HELPER: DOCX BUILDER ---
 def create_docx(full_text, title="My Novel"):
     doc = Document()
     doc.add_heading(title, 0)
-    lines = full_text.split('\n')
-    for line in lines:
-        line = line.strip()
-        if not line: continue
+    
+    # Pre-clean text into paragraphs before processing
+    normalized = normalize_text(full_text, mode="standard")
+    paragraphs = normalized.split('\n\n')
+    
+    for p_text in paragraphs:
+        if not p_text.strip(): continue
             
-        if line.startswith("## Chapter"):
-            doc.add_heading(line.replace("## ", "").strip(), level=1)
-        elif line.startswith("## "):
-            doc.add_heading(line.replace("## ", "").strip(), level=2)
+        if p_text.startswith("## Chapter"):
+            doc.add_heading(p_text.replace("## ", "").strip(), level=1)
+        elif p_text.startswith("## "):
+            doc.add_heading(p_text.replace("## ", "").strip(), level=2)
         else:
             p = doc.add_paragraph()
-            parts = re.split(r'(\*[^*]+\*)', line)
+            parts = re.split(r'(\*[^*]+\*)', p_text)
             for part in parts:
                 if part.startswith('*') and part.endswith('*') and len(part) > 2:
                     p.add_run(part[1:-1]).italic = True
@@ -150,8 +159,7 @@ with st.sidebar:
 
     st.divider()
     
-    # --- ROBUST IMPORTER ---
-    with st.expander("⚠️ Emergency Import (Word Doc Fix)"):
+    with st.expander("⚠️ Emergency Import"):
         st.write("Paste full text. I will look for 'Chapter X'.")
         import_text = st.text_area("Paste Text Here", height=300)
         
@@ -161,16 +169,14 @@ with st.sidebar:
                 c = conn.cursor()
                 c.execute("DELETE FROM chapters")
                 
-                # Fixed Regex for Python 3.13
                 chunks = re.split(r'(?i)(chapter\s+\d+)', import_text)
-                
                 current_chapter_num = 0
                 current_content = ""
                 
                 for chunk in chunks:
                     if re.match(r'(?i)chapter\s+\d+', chunk.strip()):
                         if current_chapter_num > 0:
-                            clean_content = clean_text_formatting(current_content)
+                            clean_content = normalize_text(current_content)
                             if clean_content:
                                 c.execute("INSERT INTO chapters (chapter_num, content) VALUES (?, ?)", 
                                           (current_chapter_num, clean_content))
@@ -180,7 +186,7 @@ with st.sidebar:
                         current_content += chunk
 
                 if current_chapter_num > 0:
-                    clean_content = clean_text_formatting(current_content)
+                    clean_content = normalize_text(current_content)
                     if clean_content:
                         c.execute("INSERT INTO chapters (chapter_num, content) VALUES (?, ?)", 
                                   (current_chapter_num, clean_content))
@@ -279,18 +285,27 @@ with tab2:
                         response = model.generate_content(f"{new_concept}\n{new_outline}\n{dynamic_prompt}")
 
                     if response.text:
-                        # Clean BEFORE entering editor
-                        st.session_state.editor_content = clean_text_formatting(response.text)
+                        # CLEAN IMMEDIATELY
+                        st.session_state.editor_content = normalize_text(response.text)
                         st.session_state.editor_mode = True
                         st.rerun()
                 except Exception as e: st.error(f"Error: {e}")
     else:
         st.info("📝 Edit Mode")
-        # UTILITY TO FIX SPACING MANUALLY
-        if st.button("🧹 Strip & Rebuild Paragraphs (Fix Spacing)"):
-            st.session_state.editor_content = clean_text_formatting(st.session_state.editor_content)
-            st.rerun()
+        
+        # --- NEW CONTROL PANEL FOR FORMATTING ---
+        col_ctrl1, col_ctrl2 = st.columns([1, 1])
+        with col_ctrl1:
+            spacing_mode = st.radio("Spacing Style", ["Standard (Blank Line)", "Tight (No Blank Line)"], horizontal=True)
             
+        with col_ctrl2:
+            st.write("") # Spacer
+            if st.button("✨ Apply Formatting", type="secondary"):
+                mode = "tight" if "Tight" in spacing_mode else "standard"
+                # Update Session State explicitly
+                st.session_state.editor_content = normalize_text(st.session_state.editor_content, mode=mode)
+                st.rerun()
+
         edited_text = st.text_area(f"Editing Ch {next_chap_num}", height=600, key="editor_content")
         
         c1, c2 = st.columns([1,4])
@@ -322,11 +337,12 @@ with tab3:
     st.header("The Full Manuscript")
     col1, col2 = st.columns(2)
     with col1:
+        # Same Fix Here
         if st.button("🧹 Clean Full Book"):
-            full_text_history = clean_text_formatting(full_text_history)
+            full_text_history = normalize_text(full_text_history)
             st.rerun()
     with col2:
-        if st.button("📄 Download Word Doc (Best for Atticus)"):
+        if st.button("📄 Download Word Doc"):
             doc = create_docx(full_text_history)
             buffer = BytesIO()
             doc.save(buffer)
