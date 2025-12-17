@@ -90,28 +90,27 @@ def normalize_text(text, mode="standard"):
     """
     if not text: return ""
     
-    # 1. Normalize line endings to Unix style
+    # 1. Normalize line endings
     text = text.replace('\r\n', '\n').replace('\r', '\n')
     
-    # 2. Split by 2+ newlines (paragraph breaks) to isolate paragraphs
-    #    The regex \n\s*\n matches a newline, any whitespace (including empty lines), and another newline.
+    # 2. Split by 2+ newlines (paragraph breaks)
     paragraphs = re.split(r'\n\s*\n', text)
     
-    # 3. Clean each paragraph (strip surrounding whitespace)
+    # 3. Clean each paragraph
     clean_paragraphs = [p.strip() for p in paragraphs if p.strip()]
     
     # 4. Rejoin based on mode
     if mode == "tight":
         return '\n'.join(clean_paragraphs) # Single spacing
     else:
-        return '\n\n'.join(clean_paragraphs) # Standard paragraph spacing
+        return '\n\n'.join(clean_paragraphs) # Standard spacing (one blank line)
 
 # --- HELPER: DOCX BUILDER ---
 def create_docx(full_text, title="My Novel"):
     doc = Document()
     doc.add_heading(title, 0)
     
-    # Pre-clean text into paragraphs before processing
+    # We always process "standard" spacing for docx generation to detect paragraphs correctly
     normalized = normalize_text(full_text, mode="standard")
     paragraphs = normalized.split('\n\n')
     
@@ -293,16 +292,20 @@ with tab2:
     else:
         st.info("📝 Edit Mode")
         
-        # --- NEW CONTROL PANEL FOR FORMATTING ---
+        # --- NEW: Word Count Calculation ---
+        word_count = len(st.session_state.editor_content.split())
+        st.caption(f"📊 **Current Word Count: {word_count} words**")
+        
+        # --- CONTROL PANEL ---
         col_ctrl1, col_ctrl2 = st.columns([1, 1])
         with col_ctrl1:
-            spacing_mode = st.radio("Spacing Style", ["Standard (Blank Line)", "Tight (No Blank Line)"], horizontal=True)
+            # We default to Tight here because you said you liked it
+            spacing_mode = st.radio("Spacing Style", ["Tight (No Blank Line)", "Standard (Blank Line)"], horizontal=True)
             
         with col_ctrl2:
             st.write("") # Spacer
             if st.button("✨ Apply Formatting", type="secondary"):
                 mode = "tight" if "Tight" in spacing_mode else "standard"
-                # Update Session State explicitly
                 st.session_state.editor_content = normalize_text(st.session_state.editor_content, mode=mode)
                 st.rerun()
 
@@ -335,13 +338,26 @@ with tab2:
 # TAB 3: EXPORT
 with tab3:
     st.header("The Full Manuscript")
-    col1, col2 = st.columns(2)
-    with col1:
-        # Same Fix Here
-        if st.button("🧹 Clean Full Book"):
-            full_text_history = normalize_text(full_text_history)
-            st.rerun()
-    with col2:
+    
+    # --- NEW: Full Book Formatting Controls ---
+    st.markdown("#### Global Formatting")
+    col_tools1, col_tools2, col_tools3 = st.columns([1, 1, 1])
+    
+    with col_tools1:
+        full_spacing_mode = st.radio("Global Spacing", ["Tight (No Blank Line)", "Standard (Blank Line)"], key="full_spacing_radio")
+    
+    with col_tools2:
+        st.write("") # Spacer for alignment
+        if st.button("✨ Apply to Full Book"):
+            mode = "tight" if "Tight" in full_spacing_mode else "standard"
+            # We don't save this to DB automatically to avoid accidental overrides, 
+            # we just update the preview/export buffer
+            full_text_history = normalize_text(full_text_history, mode=mode)
+            st.success("Formatting Applied to Preview & Export!")
+            # We don't rerun here immediately so the text area below updates naturally via variable
+            
+    with col_tools3:
+        st.write("")
         if st.button("📄 Download Word Doc"):
             doc = create_docx(full_text_history)
             buffer = BytesIO()
@@ -349,4 +365,4 @@ with tab3:
             buffer.seek(0)
             st.download_button("Download .docx", buffer, "my_novel.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
 
-    st.text_area("Plain Text Preview", value=full_text_history, height=600)
+    st.text_area("Full Text Preview", value=full_text_history, height=600)
