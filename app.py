@@ -7,10 +7,11 @@ import re
 import sqlite3
 from docx import Document
 from io import BytesIO
+import time
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(page_title="Gemini 3 Author Studio", layout="wide")
-st.title("Drafting with Gemini 3 Pro (Auto-Save + Rolling Memory)")
+st.title("Drafting with Gemini 3 Pro (All-In Edition)")
 
 # --- DATABASE SETUP ---
 DB_NAME = "my_novel.db"
@@ -81,8 +82,10 @@ def reset_db():
 
 init_db()
 
-# --- HARDCODED MODEL ---
+# --- MODEL CONFIGURATION ---
+# STRICTLY ENFORCING GEMINI 3 PRO PREVIEW
 MODEL_NAME = "gemini-3-pro-preview"
+
 safety_settings = {
     HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
     HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
@@ -395,15 +398,14 @@ with tab3:
 # --- TAB 4: PUBLISHER (MARKETING AGENT) ---
 with tab4:
     st.header("🚀 The Algorithmic Publisher")
-    st.markdown("Based on *The Algorithmic Copywriter* (Rufus/A9 Optimized).")
+    st.markdown("Based on *The Algorithmic Copywriter* (Rufus/A9 Optimized). Powered by **Gemini 3 Pro**.")
     
-    # Initialize Session Keys if they don't exist
     if "pub_genre" not in st.session_state: st.session_state.pub_genre = ""
     if "pub_tropes" not in st.session_state: st.session_state.pub_tropes = ""
     if "pub_tone" not in st.session_state: st.session_state.pub_tone = "Serious"
 
     # --- AUTO-DETECT BUTTON ---
-    if st.button("🧬 Auto-Analyze Book DNA (Extract Genre & Tropes)"):
+    if st.button("🧬 Auto-Analyze Book DNA"):
         with st.spinner("Reading Bible & Summaries..."):
             dna_prompt = f"""
             Analyze the following Book Bible and Chapter Summaries.
@@ -416,9 +418,9 @@ with tab4:
             {rolling_summary_context}
             
             ### TASK
-            Identify the following for a KDP marketing campaign:
-            1. **Sub-Genre:** Specific commercial sub-genre (e.g., "Military Sci-Fi", "Regency Romance").
-            2. **Core Tropes:** Top 5 tropes comma-separated (e.g., "Enemies to lovers, forced proximity").
+            Identify for KDP:
+            1. **Sub-Genre:** Specific commercial sub-genre.
+            2. **Core Tropes:** Top 5 tropes comma-separated.
             3. **Tone:** One word (Dark, Serious, Balanced, Hopeful, Humorous).
             
             Output strictly in this format:
@@ -427,39 +429,33 @@ with tab4:
             TONE: [Tone]
             """
             try:
-                dna_model = genai.GenerativeModel("gemini-1.5-pro")
+                dna_model = genai.GenerativeModel(MODEL_NAME)
                 res = dna_model.generate_content(dna_prompt).text
                 
-                # Parse
-                g = res.split("GENRE:")[1].split("TROPES:")[0].strip()
-                tr = res.split("TROPES:")[1].split("TONE:")[0].strip()
-                to = res.split("TONE:")[1].strip()
-                
-                st.session_state.pub_genre = g
-                st.session_state.pub_tropes = tr
-                st.session_state.pub_tone = to
-                st.success("DNA Extracted!")
-                st.rerun()
+                try:
+                    g = res.split("GENRE:")[1].split("TROPES:")[0].strip()
+                    tr = res.split("TROPES:")[1].split("TONE:")[0].strip()
+                    to = res.split("TONE:")[1].strip()
+                    st.session_state.pub_genre = g
+                    st.session_state.pub_tropes = tr
+                    st.session_state.pub_tone = to
+                    st.success("DNA Extracted!")
+                    st.rerun()
+                except:
+                    st.error("Analysis format error. Try again.")
             except Exception as e:
                 st.error(f"Analysis Failed: {e}")
 
-    # --- INPUTS (Now Auto-Filled) ---
+    # --- INPUTS ---
     col1, col2 = st.columns(2)
     with col1:
-        # Title usually comes from Concept, or user types it
         def_title = current_concept.split('\n')[0] if current_concept else ""
         pub_title = st.text_input("Book Title", value=def_title)
-        
-        # Genre (Auto-filled via session state)
         pub_genre = st.text_input("Sub-Genre", key="pub_genre")
         
     with col2:
-        # Tropes (Auto-filled via session state)
         pub_tropes = st.text_input("Core Tropes", key="pub_tropes")
-        
-        # Tone (Auto-filled via session state - we map text back to slider if possible, or just default)
         tone_opts = ["Dark", "Serious", "Balanced", "Hopeful", "Humorous"]
-        # Simple fuzzy match for default index
         def_index = 1
         if st.session_state.pub_tone:
             for i, t in enumerate(tone_opts):
@@ -498,7 +494,7 @@ with tab4:
                 Constraint: Keyword density max 3%.
                 """
                 try:
-                    pub_model = genai.GenerativeModel("gemini-1.5-pro")
+                    pub_model = genai.GenerativeModel(MODEL_NAME)
                     response = pub_model.generate_content(marketing_prompt)
                     st.session_state.marketing_result = response.text
                     st.rerun()
