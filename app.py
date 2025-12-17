@@ -18,13 +18,11 @@ DB_NAME = "my_novel.db"
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
-    # Table for the Book Info
     c.execute('''CREATE TABLE IF NOT EXISTS book_info (
                     id INTEGER PRIMARY KEY,
                     concept TEXT,
                     outline TEXT
                 )''')
-    # Table for Chapters
     c.execute('''CREATE TABLE IF NOT EXISTS chapters (
                     chapter_num INTEGER PRIMARY KEY,
                     content TEXT
@@ -36,12 +34,8 @@ def load_from_db():
     conn = sqlite3.connect(DB_NAME)
     conn.row_factory = sqlite3.Row
     c = conn.cursor()
-    
-    # Load Bible
     c.execute("SELECT * FROM book_info WHERE id=1")
     bible = c.fetchone()
-    
-    # Load Chapters
     c.execute("SELECT * FROM chapters ORDER BY chapter_num")
     chapters = c.fetchall()
     conn.close()
@@ -88,50 +82,44 @@ safety_settings = {
     HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
 }
 
-# --- HELPER: TEXT CLEANER ---
+# --- HELPER: "STRIP & REBUILD" TEXT CLEANER (The Fix) ---
 def clean_text_formatting(text):
+    """
+    Splits text into lines, removes ALL whitespace-only lines,
+    and rejoins them with exactly one blank line (Markdown standard).
+    """
     if not text: return ""
-    # The nuclear spacer fixer: replaces any chunk of vertical whitespace with exactly 2 newlines
-    text = re.sub(r'\n\s*\n', '\n\n', text) 
-    return text.strip()
+    
+    # 1. Split into individual lines
+    lines = text.split('\n')
+    
+    # 2. Strip whitespace from every line & discard empty ones
+    clean_lines = [line.strip() for line in lines if line.strip()]
+    
+    # 3. Join back together with exactly two newlines (Markdown paragraph break)
+    # If you prefer TIGHTER text (no blank line), change '\n\n' to '\n' below.
+    return '\n\n'.join(clean_lines)
 
 # --- HELPER: DOCX BUILDER ---
 def create_docx(full_text, title="My Novel"):
     doc = Document()
     doc.add_heading(title, 0)
-
-    # Split into lines to process them one by one
     lines = full_text.split('\n')
-    
     for line in lines:
         line = line.strip()
-        if not line:
-            continue # Skip empty lines to let Word handle spacing via styles
+        if not line: continue
             
-        # Detect Headers
         if line.startswith("## Chapter"):
-            clean_header = line.replace("## ", "").strip()
-            doc.add_heading(clean_header, level=1)
+            doc.add_heading(line.replace("## ", "").strip(), level=1)
         elif line.startswith("## "):
-            clean_header = line.replace("## ", "").strip()
-            doc.add_heading(clean_header, level=2)
+            doc.add_heading(line.replace("## ", "").strip(), level=2)
         else:
-            # Create a standard paragraph
             p = doc.add_paragraph()
-            
-            # PARSE MARKDOWN ITALICS: *text*
-            # We split by the asterisks to separate normal text from italic text
-            # Regex captures the delimiters so we don't lose them
             parts = re.split(r'(\*[^*]+\*)', line)
-            
             for part in parts:
                 if part.startswith('*') and part.endswith('*') and len(part) > 2:
-                    # Italic content (remove stars, apply style)
-                    clean_part = part[1:-1]
-                    run = p.add_run(clean_part)
-                    run.italic = True
+                    p.add_run(part[1:-1]).italic = True
                 else:
-                    # Normal content
                     p.add_run(part)
     return doc
 
@@ -152,7 +140,7 @@ def get_or_create_cache(bible_text, outline_text):
         return cache.name
     except Exception: return None
 
-# --- SIDEBAR & SETUP ---
+# --- SIDEBAR ---
 with st.sidebar:
     st.header("Settings")
     if "GOOGLE_API_KEY" in st.secrets:
@@ -162,20 +150,18 @@ with st.sidebar:
 
     st.divider()
     
-    # --- ROBUST IMPORTER (FIXED FOR PYTHON 3.13) ---
+    # --- ROBUST IMPORTER ---
     with st.expander("⚠️ Emergency Import (Word Doc Fix)"):
-        st.write("Paste your full text (Chapters 1-7). I will strictly look for 'Chapter X' headers.")
+        st.write("Paste full text. I will look for 'Chapter X'.")
         import_text = st.text_area("Paste Text Here", height=300)
         
         if st.button("Force Clean Import"):
             if import_text:
                 conn = sqlite3.connect(DB_NAME)
                 c = conn.cursor()
-                
-                # 1. Wipe database to prevent duplicates
                 c.execute("DELETE FROM chapters")
                 
-                # 2. Advanced Split: FIX APPLIED HERE
+                # Fixed Regex for Python 3.13
                 chunks = re.split(r'(?i)(chapter\s+\d+)', import_text)
                 
                 current_chapter_num = 0
@@ -183,20 +169,16 @@ with st.sidebar:
                 
                 for chunk in chunks:
                     if re.match(r'(?i)chapter\s+\d+', chunk.strip()):
-                        # SAVE PREVIOUS CHAPTER
                         if current_chapter_num > 0:
                             clean_content = clean_text_formatting(current_content)
                             if clean_content:
                                 c.execute("INSERT INTO chapters (chapter_num, content) VALUES (?, ?)", 
                                           (current_chapter_num, clean_content))
-                        
-                        # START NEW CHAPTER
                         current_chapter_num += 1
                         current_content = "" 
                     else:
                         current_content += chunk
 
-                # SAVE FINAL CHAPTER
                 if current_chapter_num > 0:
                     clean_content = clean_text_formatting(current_content)
                     if clean_content:
@@ -205,7 +187,7 @@ with st.sidebar:
 
                 conn.commit()
                 conn.close()
-                st.success(f"Successfully imported {current_chapter_num} chapters! Refreshing...")
+                st.success(f"Imported {current_chapter_num} chapters! Refreshing...")
                 st.rerun()
 
     if st.button("🔴 DANGER: Reset All Data"):
@@ -216,9 +198,7 @@ with st.sidebar:
 # --- STATE MANAGEMENT ---
 if "editor_mode" not in st.session_state: st.session_state.editor_mode = False
 
-# LOAD DATA FROM DB
 bible_data, chapter_data = load_from_db()
-
 current_concept = bible_data['concept'] if bible_data else ""
 current_outline = bible_data['outline'] if bible_data else ""
 full_text_history = ""
@@ -256,7 +236,6 @@ with tab2:
     next_chap_num = len(history_list) + 1
     st.header(f"Drafting Chapter {next_chap_num}")
 
-    # AUTO-FETCH
     if st.button(f"🔮 Auto-Fetch Ch. {next_chap_num}"):
         with st.spinner("Fetching raw instructions..."):
             prompt = f"""
@@ -264,7 +243,6 @@ with tab2:
             Do not summarize. Extract specific Scene headers, POV, and details exactly as written.
             """
             try:
-                # Use cache if available
                 cache_name = get_or_create_cache(new_concept, new_outline)
                 if cache_name:
                     c_obj = genai.caching.CachedContent.get(name=cache_name)
@@ -272,16 +250,13 @@ with tab2:
                     res = c_model.generate_content(prompt)
                 else:
                     res = model.generate_content(f"{new_outline}\n\n{prompt}")
-                
                 st.session_state[f"plan_{next_chap_num}"] = res.text
                 st.rerun()
             except Exception as e: st.error(f"Error: {e}")
 
-    # INSTRUCTIONS
     current_plan = st.session_state.get(f"plan_{next_chap_num}", "")
     chapter_instructions = st.text_area("Instructions:", value=current_plan, height=250)
 
-    # GENERATE
     if not st.session_state.editor_mode:
         if st.button(f"🚀 Generate Chapter {next_chap_num}", type="primary"):
             with st.spinner("Writing..."):
@@ -304,13 +279,15 @@ with tab2:
                         response = model.generate_content(f"{new_concept}\n{new_outline}\n{dynamic_prompt}")
 
                     if response.text:
+                        # Clean BEFORE entering editor
                         st.session_state.editor_content = clean_text_formatting(response.text)
                         st.session_state.editor_mode = True
                         st.rerun()
                 except Exception as e: st.error(f"Error: {e}")
     else:
         st.info("📝 Edit Mode")
-        if st.button("🧹 Force Clean Formatting"):
+        # UTILITY TO FIX SPACING MANUALLY
+        if st.button("🧹 Strip & Rebuild Paragraphs (Fix Spacing)"):
             st.session_state.editor_content = clean_text_formatting(st.session_state.editor_content)
             st.rerun()
             
@@ -330,43 +307,30 @@ with tab2:
                 del st.session_state.editor_content
                 st.rerun()
 
-    # HISTORY & UNDO
     if history_list and not st.session_state.editor_mode:
         st.divider()
         st.write("### History")
         if st.button("Undo Last Saved Chapter"):
             delete_last_chapter(len(history_list))
             st.rerun()
-        
         last = history_list[-1]
         st.caption(f"Last Saved: Chapter {last['chapter']}")
         st.text_area("Preview", value=last['content'], height=200, disabled=True)
 
-# TAB 3: EXPORT (With DOCX Fix)
+# TAB 3: EXPORT
 with tab3:
     st.header("The Full Manuscript")
-    st.write("Use the **Word Doc** button below to preserve Italics for Atticus/Vellum.")
-    
-    col_tools1, col_tools2 = st.columns(2)
-    with col_tools1:
-        if st.button("🧹 Clean All Formatting"):
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("🧹 Clean Full Book"):
             full_text_history = clean_text_formatting(full_text_history)
             st.rerun()
-    with col_tools2:
-        if st.button("📄 Prepare Word Doc (Preserves Italics)"):
-            # Generate the doc object
+    with col2:
+        if st.button("📄 Download Word Doc (Best for Atticus)"):
             doc = create_docx(full_text_history)
-            
-            # Save to memory buffer
             buffer = BytesIO()
             doc.save(buffer)
             buffer.seek(0)
-            
-            st.download_button(
-                label="⬇️ Download .docx (Atticus Ready)",
-                data=buffer,
-                file_name="my_novel.docx",
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-            )
+            st.download_button("Download .docx", buffer, "my_novel.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
 
     st.text_area("Plain Text Preview", value=full_text_history, height=600)
