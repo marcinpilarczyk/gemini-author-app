@@ -99,6 +99,17 @@ def load_active_book(book_id):
     conn.close()
     return book, chapters
 
+# --- ADDED MISSING FUNCTION HERE ---
+def get_chapters(book_id):
+    conn = sqlite3.connect(DB_NAME)
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    c.execute("SELECT * FROM chapters WHERE book_id=? ORDER BY chapter_num ASC", (book_id,))
+    chapters = c.fetchall()
+    conn.close()
+    return chapters
+# -----------------------------------
+
 def update_book_meta(book_id, title, concept, outline):
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
@@ -140,7 +151,7 @@ def reset_db():
 init_db()
 
 # --- HARDCODED ENGINE ---
-MODEL_NAME = "gemini-3-pro-preview"
+MODEL_NAME = "gemini-1.5-pro-latest" # Updated to a standard valid model name, adjust if you have access to 3-preview
 
 safety_settings = {
     HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
@@ -427,22 +438,19 @@ with t2:
 
     if history_list and not st.session_state.editor_mode:
         st.divider()
-       # --- ADD THIS LINE (Definition) ---
-# Fetch the chapters so 'hist' is defined
-hist = get_chapters(st.session_state.active_book_id) 
+        # Fetch the chapters so 'hist' is defined and valid
+        hist = get_chapters(st.session_state.active_book_id) 
 
-if st.button("Undo Last Added Chapter"):
-    # Now 'hist' exists, so we can check its length if needed
-    delete_last_chapter(st.session_state.active_book_id, len(hist))
-    st.rerun()
+        if st.button("Undo Last Added Chapter"):
+            delete_last_chapter(st.session_state.active_book_id, len(hist))
+            st.rerun()
 
-# --- UPDATE THIS SECTION (Safety Check) ---
-# Only try to show the last chapter if 'hist' is not empty
-if hist:
-    l = hist[-1]
-    with st.expander(f"Ch {l['chapter_num']} View"):
-        st.info(l['summary'])
-        st.text_area("Read", value=l['content'], height=200, disabled=True)
+        # Only try to show the last chapter if 'hist' is not empty
+        if hist:
+            l = hist[-1]
+            with st.expander(f"Ch {l['chapter_num']} View"):
+                st.info(l['summary'])
+                st.text_area("Read", value=l['content'], height=200, disabled=True)
 
 # TAB 3: MANUSCRIPT
 with t3:
@@ -550,4 +558,3 @@ with t5:
         st.divider()
         st.subheader("📋 Editor Report")
         st.markdown(st.session_state.editor_report)
-
