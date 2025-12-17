@@ -10,7 +10,7 @@ from io import BytesIO
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(page_title="Gemini 3 Author Studio (Persistent)", layout="wide")
-st.title("Drafting with Gemini 3 Pro (Auto-Save Enabled)")
+st.title("Drafting with Gemini 3 Pro (Auto-Save + Rolling Memory)")
 
 # --- DATABASE SETUP ---
 DB_NAME = "my_novel.db"
@@ -23,10 +23,19 @@ def init_db():
                     concept TEXT,
                     outline TEXT
                 )''')
+    # Chapters table now includes 'summary' for continuity tracking
     c.execute('''CREATE TABLE IF NOT EXISTS chapters (
                     chapter_num INTEGER PRIMARY KEY,
-                    content TEXT
+                    content TEXT,
+                    summary TEXT 
                 )''')
+    
+    # Auto-migration for existing databases (adds summary column if missing)
+    try:
+        c.execute("SELECT summary FROM chapters LIMIT 1")
+    except sqlite3.OperationalError:
+        c.execute("ALTER TABLE chapters ADD COLUMN summary TEXT")
+        
     conn.commit()
     conn.close()
 
@@ -48,10 +57,16 @@ def save_bible(concept, outline):
     conn.commit()
     conn.close()
 
-def save_chapter(num, content):
+def save_chapter(num, content, summary=""):
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO chapters (chapter_num, content) VALUES (?, ?)", (num, content))
+    # If summary is empty, try to preserve existing summary to avoid overwriting with blank
+    if not summary:
+        c.execute("SELECT summary FROM chapters WHERE chapter_num=?", (num,))
+        existing = c.fetchone()
+        summary = existing[0] if existing else ""
+        
+    c.execute("INSERT OR REPLACE INTO chapters (chapter_num, content, summary) VALUES (?, ?, ?)", (num, content, summary))
     conn.commit()
     conn.close()
 
@@ -82,11 +97,48 @@ safety_settings = {
     HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
 }
 
+# --- AGENT: THE SUMMARIZER ---
+def generate_summary(chapter_text):
+    """
+    Runs the tactical/narrative analysis prompt.
+    """
+    if not chapter_text: return ""
+    
+    prompt = f"""
+    You are an expert story analyst.
+    Summarize the provided scene text into a two-part breakdown designed for tactical continuity and market alignment.
+
+    ### TEXT TO ANALYZE
+    {chapter_text[:10000]} # Truncate if massive to save tokens
+
+    ### THE TASK
+    
+    **1. The Tactical Database (For AI Continuity)**
+    Format: Continuous paragraph.
+    Focus: Concrete facts only. List physical positions, specific injuries, weapon/tool inventory, and status of local technology. Explicitly state environment conditions.
+    Goal: Prevent hallucinations in future chapters.
+
+    **2. The Narrative Engine (For Pacing)**
+    Format: Continuous paragraph.
+    Focus: Emotional/Thematic shift. Identify "Micro-Tropes". Track entropy and power dynamics.
+    
+    **Constraints:**
+    Total Word Count: 300-400 words.
+    Tone: Serious, analytical.
+    """
+    
+    try:
+        # We create a fresh model instance to avoid context pollution
+        model = genai.GenerativeModel(MODEL_NAME, safety_settings=safety_settings)
+        response = model.generate_content(prompt)
+        return response.text
+    except Exception as e:
+        return f"Summary Error: {e}"
+
 # --- HELPER: NUCLEAR TEXT NORMALIZER ---
 def normalize_text(text, mode="standard"):
     """
-    Splits text by ANY vertical gap (one newline, two newlines, spaces on lines, etc.)
-    and rebuilds it cleanly.
+    Splits text by ANY vertical gap and rebuilds it cleanly.
     """
     if not text: return ""
     
@@ -110,7 +162,7 @@ def create_docx(full_text, title="My Novel"):
     doc = Document()
     doc.add_heading(title, 0)
     
-    # We always process "standard" spacing for docx generation to detect paragraphs correctly
+    # Always normalize to standard before export to detect paragraphs correctly
     normalized = normalize_text(full_text, mode="standard")
     paragraphs = normalized.split('\n\n')
     
@@ -123,6 +175,7 @@ def create_docx(full_text, title="My Novel"):
             doc.add_heading(p_text.replace("## ", "").strip(), level=2)
         else:
             p = doc.add_paragraph()
+            # Split by italics markers *...*
             parts = re.split(r'(\*[^*]+\*)', p_text)
             for part in parts:
                 if part.startswith('*') and part.endswith('*') and len(part) > 2:
@@ -158,6 +211,7 @@ with st.sidebar:
 
     st.divider()
     
+    # --- SECTION 1: EMERGENCY IMPORT ---
     with st.expander("⚠️ Emergency Import"):
         st.write("Paste full text. I will look for 'Chapter X'.")
         import_text = st.text_area("Paste Text Here", height=300)
@@ -168,6 +222,7 @@ with st.sidebar:
                 c = conn.cursor()
                 c.execute("DELETE FROM chapters")
                 
+                # Regex for Python 3.13 compliant split
                 chunks = re.split(r'(?i)(chapter\s+\d+)', import_text)
                 current_chapter_num = 0
                 current_content = ""
@@ -175,27 +230,75 @@ with st.sidebar:
                 for chunk in chunks:
                     if re.match(r'(?i)chapter\s+\d+', chunk.strip()):
                         if current_chapter_num > 0:
+                            # Save raw content, empty summary for now
                             clean_content = normalize_text(current_content)
                             if clean_content:
-                                c.execute("INSERT INTO chapters (chapter_num, content) VALUES (?, ?)", 
-                                          (current_chapter_num, clean_content))
+                                c.execute("INSERT INTO chapters (chapter_num, content, summary) VALUES (?, ?, ?)", 
+                                          (current_chapter_num, clean_content, ""))
                         current_chapter_num += 1
                         current_content = "" 
                     else:
                         current_content += chunk
-
+                
+                # Save last chapter
                 if current_chapter_num > 0:
                     clean_content = normalize_text(current_content)
                     if clean_content:
-                        c.execute("INSERT INTO chapters (chapter_num, content) VALUES (?, ?)", 
-                                  (current_chapter_num, clean_content))
-
+                        c.execute("INSERT INTO chapters (chapter_num, content, summary) VALUES (?, ?, ?)", 
+                                  (current_chapter_num, clean_content, ""))
+                
                 conn.commit()
                 conn.close()
-                st.success(f"Imported {current_chapter_num} chapters! Refreshing...")
+                st.success(f"Imported {current_chapter_num} chapters! Please run the Backfill tool below.")
                 st.rerun()
 
-    if st.button("🔴 DANGER: Reset All Data"):
+    st.divider()
+
+    # --- SECTION 2: BACKFILL TOOL ---
+    st.write("### 🧠 Memory Management")
+    st.info("If you just imported text, click this to generate the 'Tactical Data' so the AI remembers your story.")
+    
+    if st.button("⚡ Analyze & Index Past Chapters"):
+        if not api_key:
+            st.error("Need API Key first.")
+        else:
+            genai.configure(api_key=api_key)
+            conn = sqlite3.connect(DB_NAME)
+            conn.row_factory = sqlite3.Row
+            c = conn.cursor()
+            c.execute("SELECT * FROM chapters WHERE content IS NOT NULL")
+            all_chaps = c.fetchall()
+            
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
+            updated_count = 0
+            total = len(all_chaps)
+            
+            for i, chap in enumerate(all_chaps):
+                # Only generate if summary is missing
+                if not chap['summary'] or len(chap['summary']) < 10:
+                    status_text.text(f"Analyzing Chapter {chap['chapter_num']}...")
+                    new_sum = generate_summary(chap['content'])
+                    
+                    # Update DB
+                    up_conn = sqlite3.connect(DB_NAME)
+                    up_c = up_conn.cursor()
+                    up_c.execute("UPDATE chapters SET summary=? WHERE chapter_num=?", (new_sum, chap['chapter_num']))
+                    up_conn.commit()
+                    up_conn.close()
+                    updated_count += 1
+                
+                progress_bar.progress((i + 1) / total)
+            
+            conn.close()
+            status_text.text("✅ Indexing Complete!")
+            st.success(f"Updated Tactical Data for {updated_count} chapters.")
+            st.rerun()
+
+    st.divider()
+
+    if st.button("🔴 Reset All Data"):
         reset_db()
         st.session_state.clear()
         st.rerun()
@@ -206,12 +309,21 @@ if "editor_mode" not in st.session_state: st.session_state.editor_mode = False
 bible_data, chapter_data = load_from_db()
 current_concept = bible_data['concept'] if bible_data else ""
 current_outline = bible_data['outline'] if bible_data else ""
+
+# BUILD CONTEXTS
 full_text_history = ""
+rolling_summary_context = ""
+last_chapter_raw = ""
 history_list = []
 
 for row in chapter_data:
-    history_list.append({"chapter": row['chapter_num'], "content": row['content']})
+    history_list.append(row)
     full_text_history += f"\n\n## Chapter {row['chapter_num']}\n\n{row['content']}"
+    
+    if row['summary']:
+        rolling_summary_context += f"\n\n**Chapter {row['chapter_num']} Analysis:**\n{row['summary']}"
+    
+    last_chapter_raw = row['content']
 
 # --- MAIN APP ---
 if not api_key:
@@ -241,12 +353,10 @@ with tab2:
     next_chap_num = len(history_list) + 1
     st.header(f"Drafting Chapter {next_chap_num}")
 
+    # AUTO-FETCH
     if st.button(f"🔮 Auto-Fetch Ch. {next_chap_num}"):
         with st.spinner("Fetching raw instructions..."):
-            prompt = f"""
-            Access the Outline. Copy the section for **Chapter {next_chap_num}** VERBATIM.
-            Do not summarize. Extract specific Scene headers, POV, and details exactly as written.
-            """
+            prompt = f"Access the Outline. Copy the section for **Chapter {next_chap_num}** VERBATIM. Do not summarize."
             try:
                 cache_name = get_or_create_cache(new_concept, new_outline)
                 if cache_name:
@@ -260,21 +370,37 @@ with tab2:
             except Exception as e: st.error(f"Error: {e}")
 
     current_plan = st.session_state.get(f"plan_{next_chap_num}", "")
-    chapter_instructions = st.text_area("Instructions:", value=current_plan, height=250)
+    chapter_instructions = st.text_area("Instructions:", value=current_plan, height=200)
 
+    # GENERATE
     if not st.session_state.editor_mode:
         if st.button(f"🚀 Generate Chapter {next_chap_num}", type="primary"):
             with st.spinner("Writing..."):
                 cache_name = get_or_create_cache(new_concept, new_outline)
+                
+                # --- CONTINUITY CONTEXT ---
+                smart_context = f"""
+                ### STORY LEDGER (TACTICAL & NARRATIVE HISTORY)
+                {rolling_summary_context}
+                
+                ### IMMEDIATE CONTEXT (PREVIOUS CHAPTER END)
+                ...[End of Chapter {next_chap_num - 1}]...
+                {last_chapter_raw[-3000:] if last_chapter_raw else "Start of book."}
+                """
+                
                 dynamic_prompt = f"""
-                ### STORY SO FAR
-                {full_text_history}
+                ### STORY CONTEXT
+                {smart_context}
+                
                 ### CHAPTER INSTRUCTIONS
                 {chapter_instructions}
+                
                 ### TASK
-                Write Chapter {next_chap_num}. Output ONLY the story text.
-                **FORMATTING RULE:** Use '***' on a separate line to indicate scene breaks.
+                Write Chapter {next_chap_num}. 
+                **CONTINUITY CHECK:** Consult the Story Ledger above for inventory, injuries, and status.
+                **FORMATTING:** Use '***' for scene breaks.
                 """
+                
                 try:
                     if cache_name:
                         c_obj = genai.caching.CachedContent.get(name=cache_name)
@@ -284,26 +410,22 @@ with tab2:
                         response = model.generate_content(f"{new_concept}\n{new_outline}\n{dynamic_prompt}")
 
                     if response.text:
-                        # CLEAN IMMEDIATELY
-                        st.session_state.editor_content = normalize_text(response.text)
+                        # Normalize immediately to standard
+                        st.session_state.editor_content = normalize_text(response.text, mode="standard")
                         st.session_state.editor_mode = True
                         st.rerun()
                 except Exception as e: st.error(f"Error: {e}")
     else:
         st.info("📝 Edit Mode")
-        
-        # --- NEW: Word Count Calculation ---
         word_count = len(st.session_state.editor_content.split())
         st.caption(f"📊 **Current Word Count: {word_count} words**")
         
-        # --- CONTROL PANEL ---
+        # FORMATTING CONTROLS
         col_ctrl1, col_ctrl2 = st.columns([1, 1])
         with col_ctrl1:
-            # We default to Tight here because you said you liked it
-            spacing_mode = st.radio("Spacing Style", ["Tight (No Blank Line)", "Standard (Blank Line)"], horizontal=True)
-            
+            spacing_mode = st.radio("Spacing Style", ["Standard (Blank Line)", "Tight (No Blank Line)"], horizontal=True)
         with col_ctrl2:
-            st.write("") # Spacer
+            st.write("")
             if st.button("✨ Apply Formatting", type="secondary"):
                 mode = "tight" if "Tight" in spacing_mode else "standard"
                 st.session_state.editor_content = normalize_text(st.session_state.editor_content, mode=mode)
@@ -313,56 +435,18 @@ with tab2:
         
         c1, c2 = st.columns([1,4])
         with c1:
-            if st.button("💾 Save to Disk"):
-                save_chapter(next_chap_num, edited_text)
-                st.session_state.editor_mode = False
-                del st.session_state.editor_content
-                st.success("Saved to Database!")
-                st.rerun()
+            if st.button("💾 Save & Analyze"):
+                with st.spinner("Saving and updating Tactical Database..."):
+                    summary = generate_summary(edited_text)
+                    save_chapter(next_chap_num, edited_text, summary)
+                    st.session_state.editor_mode = False
+                    del st.session_state.editor_content
+                    st.success("Saved! Continuity updated.")
+                    st.rerun()
         with c2:
             if st.button("❌ Discard"):
                 st.session_state.editor_mode = False
                 del st.session_state.editor_content
                 st.rerun()
 
-    if history_list and not st.session_state.editor_mode:
-        st.divider()
-        st.write("### History")
-        if st.button("Undo Last Saved Chapter"):
-            delete_last_chapter(len(history_list))
-            st.rerun()
-        last = history_list[-1]
-        st.caption(f"Last Saved: Chapter {last['chapter']}")
-        st.text_area("Preview", value=last['content'], height=200, disabled=True)
-
-# TAB 3: EXPORT
-with tab3:
-    st.header("The Full Manuscript")
-    
-    # --- NEW: Full Book Formatting Controls ---
-    st.markdown("#### Global Formatting")
-    col_tools1, col_tools2, col_tools3 = st.columns([1, 1, 1])
-    
-    with col_tools1:
-        full_spacing_mode = st.radio("Global Spacing", ["Tight (No Blank Line)", "Standard (Blank Line)"], key="full_spacing_radio")
-    
-    with col_tools2:
-        st.write("") # Spacer for alignment
-        if st.button("✨ Apply to Full Book"):
-            mode = "tight" if "Tight" in full_spacing_mode else "standard"
-            # We don't save this to DB automatically to avoid accidental overrides, 
-            # we just update the preview/export buffer
-            full_text_history = normalize_text(full_text_history, mode=mode)
-            st.success("Formatting Applied to Preview & Export!")
-            # We don't rerun here immediately so the text area below updates naturally via variable
-            
-    with col_tools3:
-        st.write("")
-        if st.button("📄 Download Word Doc"):
-            doc = create_docx(full_text_history)
-            buffer = BytesIO()
-            doc.save(buffer)
-            buffer.seek(0)
-            st.download_button("Download .docx", buffer, "my_novel.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
-
-    st.text_area("Full Text Preview", value=full_text_history, height=600)
+    if
