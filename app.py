@@ -449,4 +449,38 @@ with tab2:
                 del st.session_state.editor_content
                 st.rerun()
 
-    if
+    if history_list and not st.session_state.editor_mode:
+        st.divider()
+        st.write("### History & Continuity")
+        if st.button("Undo Last Saved Chapter"):
+            delete_last_chapter(len(history_list))
+            st.rerun()
+        
+        last = history_list[-1]
+        with st.expander(f"Chapter {last['chapter_num']} - View Tactical Data", expanded=True):
+            st.info(last['summary'] if last['summary'] else "No summary available.")
+            st.text_area("Raw Text", value=last['content'], height=200, disabled=True)
+
+# TAB 3: EXPORT
+with tab3:
+    st.header("The Full Manuscript")
+    col1, col2, col3 = st.columns([1,1,1])
+    
+    with col1:
+        full_spacing_mode = st.radio("Global Spacing", ["Standard (Blank Line)", "Tight (No Blank Line)"], key="full_sp")
+    with col2:
+        st.write("")
+        if st.button("✨ Apply Global Formatting"):
+            mode = "tight" if "Tight" in full_spacing_mode else "standard"
+            full_text_history = normalize_text(full_text_history, mode=mode)
+            st.success("Preview Updated!")
+    with col3:
+        st.write("")
+        if st.button("📄 Download Word Doc (Atticus Ready)"):
+            doc = create_docx(full_text_history)
+            buffer = BytesIO()
+            doc.save(buffer)
+            buffer.seek(0)
+            st.download_button("Download .docx", buffer, "my_novel.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+
+    st.text_area("Full Text Preview", value=full_text_history, height=600)
