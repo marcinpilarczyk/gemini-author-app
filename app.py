@@ -112,9 +112,11 @@ def save_chapter(book_id, num, content, summary=""):
     c.execute("SELECT id, summary FROM chapters WHERE book_id=? AND chapter_num=?", (book_id, num))
     existing = c.fetchone()
     if existing:
+        # Update existing chapter (preserve summary if not provided)
         current_sum = summary if summary else (existing[1] if existing[1] else "")
         c.execute("UPDATE chapters SET content=?, summary=? WHERE id=?", (content, current_sum, existing[0]))
     else:
+        # Insert new chapter
         c.execute("INSERT INTO chapters (book_id, chapter_num, content, summary) VALUES (?, ?, ?, ?)", 
                   (book_id, num, content, summary))
     conn.commit()
@@ -318,6 +320,7 @@ for r in chapter_data:
 st.subheader(f"📖 {current_title}")
 t1, t2, t3, t4, t5 = st.tabs(["1. Bible", "2. Writer", "3. Manuscript", "4. Publisher", "5. Editor"])
 
+# TAB 1: BIBLE
 with t1:
     c1, c2 = st.columns(2)
     with c1:
@@ -331,12 +334,11 @@ with t1:
             update_book_meta(st.session_state.active_book_id, nti, nc, no)
             st.rerun()
 
-# TAB 2: WRITER (UPDATED WITH SELECTOR)
+# TAB 2: WRITER
 with t2:
-    # 1. CHAPTER SELECTOR
+    # CHAPTER SELECTOR
     default_next = len(history_list) + 1
     
-    # We use a session state key for the number input to keep it persistent
     if "selected_chap" not in st.session_state:
         st.session_state.selected_chap = default_next
         
@@ -356,8 +358,7 @@ with t2:
     
     st.divider()
 
-    # 2. AUTO-FETCH & PLANNING
-    # Only show auto-fetch if we are NOT in editor mode (or if we want to overwrite)
+    # AUTO-FETCH
     if st.button(f"🔮 Auto-Fetch Plan for Ch {chap_num}"):
         with st.spinner("Fetching..."):
             p = f"Access Outline. Copy section for **Chapter {chap_num}** VERBATIM. Do not summarize."
@@ -375,9 +376,9 @@ with t2:
     cp = st.session_state.get(f"pl_{chap_num}", "")
     ci = st.text_area("Chapter Plan / Instructions", value=cp, height=150)
 
-    # 3. GENERATION / EDITOR
+    # GENERATOR
     if not st.session_state.editor_mode:
-        btn_label = f"🚀 Write Chapter {chap_num}" if chap_num not in existing_chapters else f"🔄 Re-Write Chapter {chap_num} (Overwrites Existing)"
+        btn_label = f"🚀 Write Chapter {chap_num}" if chap_num not in existing_chapters else f"🔄 Re-Write Chapter {chap_num} (Overwrites)"
         
         if st.button(btn_label, type="primary"):
             with st.spinner("Writing..."):
@@ -396,6 +397,7 @@ with t2:
                         st.rerun()
                 except: st.error("Error")
     else:
+        # EDITOR MODE
         st.info(f"📝 Editing Chapter {chap_num}")
         st.caption(f"Words: {len(st.session_state.ed_con.split())}")
         cm1, cm2 = st.columns([1,1])
@@ -433,6 +435,7 @@ with t2:
             st.info(l['summary'])
             st.text_area("Read", value=l['content'], height=200, disabled=True)
 
+# TAB 3: MANUSCRIPT
 with t3:
     c1, c2, c3 = st.columns([1,1,1])
     with c1: fm = st.radio("Global Sp", ["Standard", "Tight"], key="gsp")
@@ -450,6 +453,7 @@ with t3:
             st.download_button("Download", b, f"{current_title}.docx")
     st.text_area("Full Text", value=full_text, height=600)
 
+# TAB 4: PUBLISHER
 with t4:
     st.header("🚀 Publisher")
     if "pg" not in st.session_state: st.session_state.pg = ""
@@ -482,6 +486,7 @@ with t4:
     if "mres" in st.session_state:
         st.divider(); st.text_area("Result", value=st.session_state.mres, height=600)
 
+# TAB 5: EDITOR
 with t5:
     st.header("🧐 The Continuity Editor")
     st.markdown("Scans the entire manuscript for inconsistencies, timeline errors, and plot holes.")
