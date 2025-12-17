@@ -430,12 +430,7 @@ with t2:
         if st.button("Undo Last Added Chapter"):
             delete_last_chapter(st.session_state.active_book_id, len(hist))
             st.rerun()
-        # Check if it exists in session state first
-if 'hist' in st.session_state and st.session_state.hist:
-    l = st.session_state.hist[-1]
-else:
-    # Handle the case where history is empty or missing
-    l = None
+        l = hist[-1]
         with st.expander(f"Ch {l['chapter_num']} View"):
             st.info(l['summary'])
             st.text_area("Read", value=l['content'], height=200, disabled=True)
@@ -546,4 +541,3 @@ with t5:
         st.divider()
         st.subheader("📋 Editor Report")
         st.markdown(st.session_state.editor_report)
-
