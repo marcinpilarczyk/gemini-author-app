@@ -162,7 +162,7 @@ safety_settings = {
 # --- HELPERS ---
 def generate_summary(chapter_text):
     if not chapter_text: return ""
-    prompt = f"Analyze strictly for continuity:\n{chapter_text[:12000]}\nOutput: 1. Facts/Items/Injuries. 2. Pacing."
+    prompt = f"Analyze strictly for continuity:\n{chapter_text[:12000]}\nOutput: 1. Facts/Items/Injuries. 2. Pacing. 3. Key Decision/Outcome"
     try:
         # Always use the current global MODEL_NAME (selected by user)
         model = genai.GenerativeModel(MODEL_NAME, safety_settings=safety_settings)
@@ -624,3 +624,4 @@ with t5:
         st.divider()
         st.subheader("📋 Editor Report")
         st.markdown(st.session_state.editor_report)
+
