@@ -149,8 +149,8 @@ def reset_db():
 init_db()
 
 # --- MODEL CONFIGURATION ---
-# Default to Gemini 3 Pro if available
-MODEL_NAME = "gemini-3-pro-preview" 
+# Default to Gemini 2.0 Flash (Stable/Fast)
+MODEL_NAME = "gemini-2.0-flash-exp" 
 
 safety_settings = {
     HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
@@ -167,7 +167,7 @@ def generate_summary(chapter_text):
         # Always use the current global MODEL_NAME (selected by user)
         model = genai.GenerativeModel(MODEL_NAME, safety_settings=safety_settings)
         return model.generate_content(prompt).text
-    except Exception as e: return f"Error: {e}"
+    except Exception as e: return f"Error generating summary: {e}"
 
 def normalize_text(text, mode="standard"):
     if not text: return ""
@@ -227,11 +227,11 @@ with st.sidebar:
     if "GOOGLE_API_KEY" in st.secrets: api_key = st.secrets["GOOGLE_API_KEY"]
     else: api_key = st.text_input("Enter Google API Key", type="password")
     
-    # --- ENGINE SELECTOR (FIXED) ---
+    # --- ENGINE SELECTOR ---
     available_models = [
-        "gemini-3-pro-preview",    # Added back!
-        "gemini-3-flash-preview",  # Added back!
         "gemini-2.0-flash-exp",
+        "gemini-3-pro-preview",
+        "gemini-3-flash-preview",
         "gemini-1.5-pro-latest",
         "gemini-1.5-flash-latest"
     ]
@@ -417,7 +417,8 @@ with t2:
                 else: res = model.generate_content(f"{no}\n\n{p}")
                 st.session_state[f"pl_{chap_num}"] = res.text
                 st.rerun()
-            except: st.error("Error")
+            except Exception as e: 
+                st.error(f"Error fetching plan: {e}")
     
     cp = st.session_state.get(f"pl_{chap_num}", "")
     ci = st.text_area("Chapter Plan / Instructions", value=cp, height=150)
@@ -441,7 +442,9 @@ with t2:
                         st.session_state.ed_con = normalize_text(res.text, "standard")
                         st.session_state.editor_mode = True
                         st.rerun()
-                except: st.error("Error")
+                except Exception as e: 
+                    st.error(f"Error generating chapter: {e}")
+                    st.caption("Try switching to a different engine in the sidebar.")
     else:
         # EDITOR MODE
         st.info(f"📝 Editing Chapter {chap_num}")
@@ -532,7 +535,8 @@ with t4:
                 st.session_state.pt = res.split("TROPES:")[1].split("TONE:")[0].strip()
                 st.session_state.pto = res.split("TONE:")[1].strip()
                 st.rerun()
-            except: st.error("Error")
+            except Exception as e: 
+                st.error(f"Error analyzing DNA: {e}")
 
     c1, c2 = st.columns(2)
     with c1: pg = st.text_input("Genre", key="pg")
@@ -544,7 +548,8 @@ with t4:
             try:
                 st.session_state.mres = model.generate_content(mp).text
                 st.rerun()
-            except: st.error("Error")
+            except Exception as e: 
+                st.error(f"Error generating package: {e}")
     
     if "mres" in st.session_state:
         st.divider(); st.text_area("Result", value=st.session_state.mres, height=600)
