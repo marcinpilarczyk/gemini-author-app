@@ -148,8 +148,9 @@ def reset_db():
 
 init_db()
 
-# --- HARDCODED ENGINE ---
-MODEL_NAME = "gemini-1.5-pro-latest"
+# --- MODEL CONFIGURATION ---
+# Default fallback, but will be overwritten by Sidebar selection
+MODEL_NAME = "gemini-2.0-flash-exp" 
 
 safety_settings = {
     HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
@@ -163,6 +164,7 @@ def generate_summary(chapter_text):
     if not chapter_text: return ""
     prompt = f"Analyze strictly for continuity:\n{chapter_text[:12000]}\nOutput: 1. Facts/Items/Injuries. 2. Pacing."
     try:
+        # Always use the current global MODEL_NAME (selected by user)
         model = genai.GenerativeModel(MODEL_NAME, safety_settings=safety_settings)
         return model.generate_content(prompt).text
     except Exception as e: return f"Error: {e}"
@@ -175,7 +177,6 @@ def normalize_text(text, mode="standard"):
     if mode == "tight": return '\n'.join(clean_paragraphs)
     else: return '\n\n'.join(clean_paragraphs)
 
-# --- UPDATED EXPORT FUNCTION: Handles Bold (**) and Italics (*) ---
 def create_docx(full_text, title):
     doc = Document()
     doc.add_heading(title, 0)
@@ -191,7 +192,6 @@ def create_docx(full_text, title):
         else:
             p = doc.add_paragraph()
             # Split by Bold (**) OR Italic (*) markers
-            # Regex: Finds **bold** OR *italics*
             parts = re.split(r'(\*\*[^*]+\*\*|\*[^*]+\*)', p_text)
             for part in parts:
                 if part.startswith('**') and part.endswith('**') and len(part) > 4:
@@ -223,9 +223,35 @@ def get_or_create_cache(bible_text, outline_text):
 # --- SIDEBAR ---
 with st.sidebar:
     st.header("🔑 Settings")
-    st.caption(f"🚀 Engine: **{MODEL_NAME}**")
+    
     if "GOOGLE_API_KEY" in st.secrets: api_key = st.secrets["GOOGLE_API_KEY"]
     else: api_key = st.text_input("Enter Google API Key", type="password")
+    
+    # --- ENGINE SELECTOR (NEW) ---
+    available_models = [
+        "gemini-2.0-flash-exp",
+        "gemini-1.5-pro-latest",
+        "gemini-1.5-flash-latest",
+        "gemini-exp-1206"
+    ]
+    # Check if we have a saved model preference
+    if "model_name" not in st.session_state:
+        st.session_state.model_name = available_models[0]
+        
+    selected_model = st.selectbox(
+        "🤖 Engine", 
+        available_models, 
+        index=available_models.index(st.session_state.model_name) if st.session_state.model_name in available_models else 0
+    )
+    
+    # If model changed, clear cache and update state
+    if selected_model != st.session_state.model_name:
+        st.session_state.model_name = selected_model
+        st.session_state.cache_name = None # Invalidate cache because it's tied to the model
+        st.rerun()
+        
+    # Update global variable for helpers to use
+    MODEL_NAME = st.session_state.model_name
     
     st.divider()
     st.subheader("📚 Library")
@@ -313,6 +339,7 @@ if not api_key:
     st.stop()
 
 genai.configure(api_key=api_key)
+# Initialize the model with the SELECTED model name from Sidebar
 model = genai.GenerativeModel(MODEL_NAME, safety_settings=safety_settings)
 
 if "editor_mode" not in st.session_state: st.session_state.editor_mode = False
@@ -415,7 +442,7 @@ with t2:
                         st.rerun()
                 except: st.error("Error")
     else:
-        # EDITOR MODE - NOW WITH PREVIEW TAB
+        # EDITOR MODE
         st.info(f"📝 Editing Chapter {chap_num}")
         st.caption(f"Words: {len(st.session_state.ed_con.split())}")
         cm1, cm2 = st.columns([1,1])
@@ -462,7 +489,7 @@ with t2:
             l = hist[-1]
             with st.expander(f"Ch {l['chapter_num']} View"):
                 st.info(l['summary'])
-                st.markdown(l['content']) # Shows MD in History view too
+                st.markdown(l['content']) 
 
 # TAB 3: MANUSCRIPT
 with t3:
