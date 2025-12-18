@@ -149,8 +149,8 @@ def reset_db():
 init_db()
 
 # --- MODEL CONFIGURATION ---
-# Default fallback, but will be overwritten by Sidebar selection
-MODEL_NAME = "gemini-3.0-pro-preview" 
+# Default to Gemini 3 Pro if available
+MODEL_NAME = "gemini-3-pro-preview" 
 
 safety_settings = {
     HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
@@ -227,14 +227,15 @@ with st.sidebar:
     if "GOOGLE_API_KEY" in st.secrets: api_key = st.secrets["GOOGLE_API_KEY"]
     else: api_key = st.text_input("Enter Google API Key", type="password")
     
-    # --- ENGINE SELECTOR (NEW) ---
+    # --- ENGINE SELECTOR (FIXED) ---
     available_models = [
+        "gemini-3-pro-preview",    # Added back!
+        "gemini-3-flash-preview",  # Added back!
         "gemini-2.0-flash-exp",
         "gemini-1.5-pro-latest",
-        "gemini-1.5-flash-latest",
-        "gemini-exp-1206"
+        "gemini-1.5-flash-latest"
     ]
-    # Check if we have a saved model preference
+    
     if "model_name" not in st.session_state:
         st.session_state.model_name = available_models[0]
         
@@ -247,11 +248,11 @@ with st.sidebar:
     # If model changed, clear cache and update state
     if selected_model != st.session_state.model_name:
         st.session_state.model_name = selected_model
-        st.session_state.cache_name = None # Invalidate cache because it's tied to the model
+        st.session_state.cache_name = None 
         st.rerun()
         
-    # Update global variable for helpers to use
     MODEL_NAME = st.session_state.model_name
+    st.caption(f"Active: **{MODEL_NAME}**")
     
     st.divider()
     st.subheader("📚 Library")
@@ -618,4 +619,3 @@ with t5:
         st.divider()
         st.subheader("📋 Editor Report")
         st.markdown(st.session_state.editor_report)
-
