@@ -150,7 +150,7 @@ init_db()
 
 # --- MODEL CONFIGURATION ---
 # Default fallback, but will be overwritten by Sidebar selection
-MODEL_NAME = "gemini-2.0-flash-exp" 
+MODEL_NAME = "gemini-3.0-pro-preview" 
 
 safety_settings = {
     HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
@@ -618,3 +618,4 @@ with t5:
         st.divider()
         st.subheader("📋 Editor Report")
         st.markdown(st.session_state.editor_report)
+
