@@ -385,16 +385,15 @@ with t4:
 
 # TAB 5: EDITOR
 with t5:
-    st.header("🧐 Internal Consistency Editor")
-    st.markdown("This scan treats your **Manuscript** as the new truth. It ignores the original plan and looks for contradictions within the text itself.")
+    st.header("🧐 Smart Internal Consistency Editor")
+    st.markdown("This scan treats your **Manuscript** as the new truth. It looks for contradictions within the text and proposes the **easiest possible fixes**.")
     strict_config = genai.types.GenerationConfig(temperature=0.2, top_p=0.95, max_output_tokens=65000)
     
-    if st.button("🔍 Run Internal Consistency Scan"):
+    if st.button("🔍 Run Full Internal Logic Scan"):
         if len(full_text) < 500: st.error("Manuscript too short to scan.")
         else:
-            with st.spinner("Analyzing manuscript for cross-chapter contradictions..."):
-                # PIVOT: Prompt ignores Bible/Outline and focuses only on Manuscript consistency.
-                prompt = f"""You are a ruthless Continuity Editor. 
+            with st.spinner("Analyzing manuscript and calculating minimal fixes..."):
+                prompt = f"""You are a high-level Continuity Editor. 
 Your ONLY source of truth is the MANUSCRIPT text provided below. 
 The story may have evolved away from the original outline; your job is to ensure the story doesn't contradict ITSELF across chapters.
 
@@ -402,9 +401,9 @@ The story may have evolved away from the original outline; your job is to ensure
 {full_text}
 
 ### YOUR TASK
-1. Identify logic breaks where a fact in one chapter contradicts a fact in another (e.g., character eye colors, physical locations, wounds, inventory, or the time of day).
-2. Look for "teleportation" errors where characters move too fast between distant locations.
-3. Check for character trait drifts or impossible physics that break your own established rules.
+1. Identify logic breaks where a fact in one chapter contradicts a fact in another (e.g., character traits, physical locations, wounds, inventory, or time of day).
+2. Look for "teleportation" errors or rules of physics being broken.
+3. For EVERY contradiction found, propose a "Minimal Fix." This must be a specific suggestion that resolves the issue while changing the FEWEST amount of words possible (ideally a single sentence tweak in the later chapter to align it with the earlier one).
 
 ### OUTPUT FORMAT
 Provide the report as:
@@ -412,11 +411,11 @@ Provide the report as:
 * **Evidence A:** "[Quote sentence from earlier chapter]"
 * **Evidence B:** "[Quote sentence from later chapter that contradicts it]"
 * **Verdict:** [Short explanation of why this is a logic break]
+* **Minimal Fix:** [The exact sentence change or insertion needed to fix it with the least amount of disruption to your current writing.]
 
 If everything is consistent, write "NO INTERNAL CONTRADICTIONS FOUND."
 """
                 try:
-                    # We still use the cache if available to optimize speed, but the prompt overrides the "Bible" truth.
                     cn = get_or_create_cache(nc, no)
                     response = genai.GenerativeModel.from_cached_content(cached_content=genai.caching.CachedContent.get(name=cn)).generate_content(prompt, generation_config=strict_config) if cn else model.generate_content(prompt, generation_config=strict_config)
                     
