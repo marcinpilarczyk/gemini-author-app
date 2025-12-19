@@ -192,6 +192,7 @@ with st.sidebar:
     MODEL_NAME = st.session_state.model_name
     
     st.divider()
+    st.subheader("📚 Library")
     all_books = get_all_books()
     if not all_books:
         first_id = create_new_book("My First Book"); st.session_state.active_book_id = first_id; st.rerun()
@@ -200,6 +201,66 @@ with st.sidebar:
     sel_id = st.selectbox("Current Book", options=book_opts.keys(), format_func=lambda x: book_opts[x], index=list(book_opts.keys()).index(st.session_state.active_book_id) if st.session_state.active_book_id in book_opts else 0)
     if sel_id != st.session_state.active_book_id:
         st.session_state.active_book_id = sel_id; st.session_state.cache_name = None; st.rerun()
+
+    with st.popover("➕ New Book"):
+        nt = st.text_input("Title", "Untitled")
+        if st.button("Create"):
+            nid = create_new_book(nt)
+            st.session_state.active_book_id = nid
+            st.rerun()
+
+    st.divider()
+    
+    with st.expander("⚠️ Import Manuscript"):
+        imp_txt = st.text_area("Paste Full Text (Will split by 'Chapter X')", height=200)
+        if st.button("Import"):
+            if imp_txt:
+                conn = sqlite3.connect(DB_NAME)
+                c = conn.cursor()
+                c.execute("DELETE FROM chapters WHERE book_id=?", (st.session_state.active_book_id,))
+                chunks = re.split(r'(?i)(chapter\s+\d+)', imp_txt)
+                cn, cc = 0, ""
+                for ch in chunks:
+                    if re.match(r'(?i)chapter\s+\d+', ch.strip()):
+                        if cn > 0:
+                            cl = normalize_text(cc)
+                            if cl: c.execute("INSERT INTO chapters (book_id, chapter_num, content, summary) VALUES (?, ?, ?, ?)", (st.session_state.active_book_id, cn, cl, ""))
+                        cn += 1
+                        cc = ""
+                    else: cc += ch
+                if cn > 0:
+                    cl = normalize_text(cc)
+                    if cl: c.execute("INSERT INTO chapters (book_id, chapter_num, content, summary) VALUES (?, ?, ?, ?)", (st.session_state.active_book_id, cn, cl, ""))
+                conn.commit()
+                conn.close()
+                st.success("Imported!")
+                st.rerun()
+
+    if st.button("⚡ Backfill Summaries"):
+        if not api_key: st.error("Need Key")
+        else:
+            genai.configure(api_key=api_key)
+            conn = sqlite3.connect(DB_NAME)
+            conn.row_factory = sqlite3.Row
+            c = conn.cursor()
+            c.execute("SELECT * FROM chapters WHERE book_id=? AND content IS NOT NULL", (st.session_state.active_book_id,))
+            rows = c.fetchall()
+            bar = st.progress(0)
+            for i, r in enumerate(rows):
+                if not r['summary'] or len(r['summary']) < 10:
+                    s = generate_summary(r['content'])
+                    c2 = conn.cursor()
+                    c2.execute("UPDATE chapters SET summary=? WHERE id=?", (s, r['id']))
+                    conn.commit()
+                bar.progress((i+1)/len(rows))
+            conn.close()
+            st.success("Backfill Complete!")
+            st.rerun()
+
+    if st.button("🔴 Reset Database"):
+        reset_db()
+        st.session_state.clear()
+        st.rerun()
 
 # --- MAIN LOGIC ---
 if not api_key: st.warning("👈 Enter API Key"); st.stop()
@@ -289,7 +350,8 @@ with t2:
                     sm = generate_summary(et); save_chapter(st.session_state.active_book_id, chap_num, et, sm)
                     st.session_state.editor_mode = False; del st.session_state.ed_con; st.rerun()
         with c2:
-            if st.button("❌ Discard"): st.session_state.editor_mode = False; del st.session_state.ed_con; st.rerun()
+            if st.button("❌ Discard"):
+                st.session_state.editor_mode = False; del st.session_state.ed_con; st.rerun()
 
     if history_list and not st.session_state.editor_mode:
         st.divider()
@@ -323,17 +385,17 @@ with t4:
 # TAB 5: EDITOR
 with t5:
     st.header("🧐 Continuity Editor")
-    strict_config = genai.types.GenerationConfig(temperature=0.2, top_p=0.95, max_output_tokens=32000)
+    st.markdown("Scans for logic breaks, timeline errors, and character inconsistencies.")
+    strict_config = genai.types.GenerationConfig(temperature=0.2, top_p=0.95, max_output_tokens=65000)
     if st.button("🔍 Run Full Scan"):
         if len(full_text) < 500: st.error("Manuscript too short.")
         else:
             with st.spinner("Scanning..."):
-                prompt = f"You are a Continuity Editor. Check logic inconsistencies in the manuscript against the Bible.\n\n### BIBLE\n{nc}\n{no}\n\n### MANUSCRIPT\n{full_text}\n\n### TASK\nList specific errors with quotes as evidence. Focus on characters, timeline, and physics."
+                prompt = f"You are a ruthless Continuity Editor. Check logic inconsistencies in the manuscript against the Bible.\n\n### BIBLE\n{nc}\n{no}\n\n### MANUSCRIPT\n{full_text}\n\n### TASK\nAnalyze inconsistencies. QUOTE the text as evidence. Focus on character states, timeline, and physics."
                 try:
                     cn = get_or_create_cache(nc, no)
                     response = genai.GenerativeModel.from_cached_content(cached_content=genai.caching.CachedContent.get(name=cn)).generate_content(prompt, generation_config=strict_config) if cn else model.generate_content(prompt, generation_config=strict_config)
                     
-                    # ROBUST ERROR HANDLING
                     if hasattr(response, 'text') and response.text:
                         st.session_state.editor_report = response.text; st.rerun()
                     elif response.candidates[0].finish_reason == 2:
