@@ -126,7 +126,17 @@ safety_settings = {
 # --- HELPERS ---
 def generate_summary(chapter_text):
     if not chapter_text: return ""
-    prompt = f"Analyze strictly for continuity:\n{chapter_text[:12000]}\nOutput: 1. Facts/Items/Injuries. 2. Pacing."
+    # UPDATED PROMPT: Now explicitly asks for WHAT HAPPENED (Narrative Summary)
+    prompt = f"""Analyze the following chapter and provide a technical summary for an author's continuity ledger.
+    
+    Output Format:
+    1. Narrative Summary: A concise paragraph of what actually happened (the events and plot movements).
+    2. Facts/Items/Injuries: Key details (character descriptions, specific items found/used, new wounds, locations).
+    3. Pacing: Analysis of the scene's intensity shifts (Start, Middle, End).
+    
+    Chapter Text:
+    {chapter_text[:12000]}"""
+    
     try:
         model = genai.GenerativeModel(MODEL_NAME, safety_settings=safety_settings)
         return model.generate_content(prompt).text
@@ -199,7 +209,14 @@ with st.sidebar:
         first_id = create_new_book("My First Book"); st.session_state.active_book_id = first_id; st.rerun()
     if "active_book_id" not in st.session_state: st.session_state.active_book_id = all_books[0]['id']
     book_opts = {b['id']: b['title'] for b in all_books}
-    sel_id = st.selectbox("Current Book", options=book_opts.keys(), format_func=lambda x: book_opts[x], index=list(book_opts.keys()).index(st.session_state.active_book_id) if st.session_state.active_book_id in book_opts else 0)
+    
+    # Selection logic
+    try:
+        current_book_index = list(book_opts.keys()).index(st.session_state.active_book_id)
+    except ValueError:
+        current_book_index = 0
+        
+    sel_id = st.selectbox("Current Book", options=book_opts.keys(), format_func=lambda x: book_opts[x], index=current_book_index)
     if sel_id != st.session_state.active_book_id:
         st.session_state.active_book_id = sel_id; st.session_state.cache_name = None; st.rerun()
 
