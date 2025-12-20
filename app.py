@@ -125,7 +125,7 @@ safety_settings = {
 
 # --- HELPERS ---
 def generate_summary(chapter_text):
-    if not chapter_text: return ""
+    if not chapter_text or len(chapter_text.strip()) < 50: return ""
     # UPDATED PROMPT: Now explicitly asks for WHAT HAPPENED (Narrative Summary)
     prompt = f"""Analyze the following chapter and provide a technical summary for an author's continuity ledger.
     
@@ -210,7 +210,6 @@ with st.sidebar:
     if "active_book_id" not in st.session_state: st.session_state.active_book_id = all_books[0]['id']
     book_opts = {b['id']: b['title'] for b in all_books}
     
-    # Selection logic
     try:
         current_book_index = list(book_opts.keys()).index(st.session_state.active_book_id)
     except ValueError:
@@ -254,26 +253,41 @@ with st.sidebar:
                 st.success("Imported!")
                 st.rerun()
 
-    if st.button("⚡ Backfill Summaries"):
-        if not api_key: st.error("Need Key")
-        else:
-            genai.configure(api_key=api_key)
-            conn = sqlite3.connect(DB_NAME)
-            conn.row_factory = sqlite3.Row
-            c = conn.cursor()
-            c.execute("SELECT * FROM chapters WHERE book_id=? AND content IS NOT NULL", (st.session_state.active_book_id,))
-            rows = c.fetchall()
-            bar = st.progress(0)
-            for i, r in enumerate(rows):
-                if not r['summary'] or len(r['summary']) < 10:
-                    s = generate_summary(r['content'])
-                    c2 = conn.cursor()
-                    c2.execute("UPDATE chapters SET summary=? WHERE id=?", (s, r['id']))
-                    conn.commit()
-                bar.progress((i+1)/len(rows))
-            conn.close()
-            st.success("Backfill Complete!")
-            st.rerun()
+    # --- UPDATED BACKFILL SECTION ---
+    with st.expander("⚡ Memory Management"):
+        overwrite_summaries = st.checkbox("Overwrite existing summaries", value=False, help="Enable this to regenerate summaries for all chapters, applying the new 'Narrative Summary' format.")
+        
+        if st.button("Process Summaries"):
+            if not api_key: st.error("Need Key")
+            else:
+                genai.configure(api_key=api_key)
+                conn = sqlite3.connect(DB_NAME)
+                conn.row_factory = sqlite3.Row
+                c = conn.cursor()
+                c.execute("SELECT * FROM chapters WHERE book_id=? AND content IS NOT NULL", (st.session_state.active_book_id,))
+                rows = c.fetchall()
+                
+                if not rows:
+                    st.warning("No chapters with content found to summarize.")
+                else:
+                    bar = st.progress(0)
+                    status_text = st.empty()
+                    for i, r in enumerate(rows):
+                        # Logic: process if missing, or if overwrite is checked
+                        should_process = not r['summary'] or len(r['summary']) < 10 or overwrite_summaries
+                        
+                        if should_process:
+                            status_text.text(f"Summarizing Chapter {r['chapter_num']}...")
+                            s = generate_summary(r['content'])
+                            if s and not s.startswith("Error"):
+                                c2 = conn.cursor()
+                                c2.execute("UPDATE chapters SET summary=? WHERE id=?", (s, r['id']))
+                                conn.commit()
+                        bar.progress((i+1)/len(rows))
+                    
+                    status_text.text("Processing complete.")
+                    st.success("Backfill Complete!")
+                    st.rerun()
 
     if st.button("🔴 Reset Database"):
         reset_db()
