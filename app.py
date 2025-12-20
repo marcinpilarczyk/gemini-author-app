@@ -5,6 +5,7 @@ from google.generativeai.types import HarmCategory, HarmBlockThreshold
 import datetime
 import re
 import sqlite3
+import json
 from docx import Document
 from io import BytesIO
 import time
@@ -90,7 +91,6 @@ def save_chapter(book_id, num, content, summary=""):
         current_sum = summary if summary else (existing[1] if existing[1] else "")
         c.execute("UPDATE chapters SET content=?, summary=? WHERE id=?", (content, current_sum, existing[0]))
     else:
-        # Insert new chapter
         c.execute("INSERT INTO chapters (book_id, chapter_num, content, summary) VALUES (?, ?, ?, ?)", 
                   (book_id, num, content, summary))
     conn.commit()
@@ -126,7 +126,6 @@ safety_settings = {
 # --- HELPERS ---
 def generate_summary(chapter_text):
     if not chapter_text or len(chapter_text.strip()) < 50: return ""
-    # UPDATED PROMPT: Now explicitly asks for WHAT HAPPENED (Narrative Summary)
     prompt = f"""Analyze the following chapter and provide a technical summary for an author's continuity ledger.
     
     Output Format:
@@ -253,46 +252,32 @@ with st.sidebar:
                 st.success("Imported!")
                 st.rerun()
 
-    # --- UPDATED BACKFILL SECTION ---
     with st.expander("⚡ Memory Management"):
-        overwrite_summaries = st.checkbox("Overwrite existing summaries", value=False, help="Enable this to regenerate summaries for all chapters, applying the new 'Narrative Summary' format.")
-        
+        overwrite_summaries = st.checkbox("Overwrite existing summaries", value=False)
         if st.button("Process Summaries"):
             if not api_key: st.error("Need Key")
             else:
                 genai.configure(api_key=api_key)
-                conn = sqlite3.connect(DB_NAME)
-                conn.row_factory = sqlite3.Row
+                conn = sqlite3.connect(DB_NAME); conn.row_factory = sqlite3.Row
                 c = conn.cursor()
                 c.execute("SELECT * FROM chapters WHERE book_id=? AND content IS NOT NULL", (st.session_state.active_book_id,))
                 rows = c.fetchall()
-                
-                if not rows:
-                    st.warning("No chapters with content found to summarize.")
+                if not rows: st.warning("No chapters found.")
                 else:
-                    bar = st.progress(0)
-                    status_text = st.empty()
+                    bar = st.progress(0); status = st.empty()
                     for i, r in enumerate(rows):
-                        # Logic: process if missing, or if overwrite is checked
-                        should_process = not r['summary'] or len(r['summary']) < 10 or overwrite_summaries
-                        
-                        if should_process:
-                            status_text.text(f"Summarizing Chapter {r['chapter_num']}...")
+                        if not r['summary'] or len(r['summary']) < 10 or overwrite_summaries:
+                            status.text(f"Summarizing Ch {r['chapter_num']}...")
                             s = generate_summary(r['content'])
                             if s and not s.startswith("Error"):
                                 c2 = conn.cursor()
                                 c2.execute("UPDATE chapters SET summary=? WHERE id=?", (s, r['id']))
                                 conn.commit()
                         bar.progress((i+1)/len(rows))
-                    
-                    status_text.text("Processing complete.")
-                    st.success("Backfill Complete!")
-                    st.rerun()
+                    status.text("Done."); st.success("Backfill Complete!"); st.rerun()
 
     if st.button("🔴 Reset Database"):
-        reset_db()
-        st.session_state.clear()
-        st.rerun()
+        reset_db(); st.session_state.clear(); st.rerun()
 
 # --- MAIN LOGIC ---
 if not api_key: st.warning("👈 Enter API Key"); st.stop()
@@ -306,11 +291,8 @@ current_outline = active_book['outline']
 
 full_text = ""
 rolling_sum = ""
-history_list = []
 existing_chapters = {}
-
 for r in chapter_data:
-    history_list.append(r)
     existing_chapters[r['chapter_num']] = r['content']
     full_text += f"\n\n## Chapter {r['chapter_num']}\n\n{r['content']}"
     if r['summary']: rolling_sum += f"\n\n**Ch {r['chapter_num']}:**\n{r['summary']}"
@@ -318,60 +300,46 @@ for r in chapter_data:
 st.subheader(f"📖 {current_title}")
 t1, t2, t3, t4, t5 = st.tabs(["1. Bible", "2. Writer", "3. Manuscript", "4. Publisher", "5. Editor"])
 
-# TAB 1: BIBLE
 with t1:
     c1, c2 = st.columns(2)
-    with c1:
-        nti = st.text_input("Title", value=current_title)
-        nc = st.text_area("Concept (Premise, Characters, Style)", value=current_concept, height=500)
-    with c2:
-        st.write(""); st.write(""); st.write("")
-        no = st.text_area("Outline (Timeline & Chapter Beats)", value=current_outline, height=500)
+    with c1: nti = st.text_input("Title", value=current_title); nc = st.text_area("Concept", value=current_concept, height=500)
+    with c2: st.write(""); st.write(""); no = st.text_area("Outline", value=current_outline, height=500)
     if nc!=current_concept or no!=current_outline or nti!=current_title:
-        if st.button("💾 Save Bible"):
-            update_book_meta(st.session_state.active_book_id, nti, nc, no); st.rerun()
+        if st.button("💾 Save Bible"): update_book_meta(st.session_state.active_book_id, nti, nc, no); st.rerun()
 
-# TAB 2: WRITER
 with t2:
-    if "selected_chap" not in st.session_state: st.session_state.selected_chap = len(history_list) + 1
+    if "selected_chap" not in st.session_state: st.session_state.selected_chap = len(chapter_data) + 1
     if "editor_mode" not in st.session_state: st.session_state.editor_mode = False
-    
     c_sel1, c_sel2 = st.columns([1, 4])
-    with c_sel1:
-        chap_num = st.number_input("Chapter #", min_value=1, value=st.session_state.selected_chap, step=1)
-        st.session_state.selected_chap = chap_num
+    with c_sel1: chap_num = st.number_input("Chapter #", min_value=1, value=st.session_state.selected_chap, step=1); st.session_state.selected_chap = chap_num
     with c_sel2:
         st.write(""); st.write("")
         if chap_num in existing_chapters and not st.session_state.editor_mode:
-            if st.button(f"✏️ Load Chapter {chap_num} for Editing"):
+            if st.button(f"✏️ Load Chapter {chap_num}"):
                 st.session_state.ed_con = existing_chapters[chap_num]; st.session_state.editor_mode = True; st.rerun()
-    
     st.divider()
     if st.button(f"🔮 Auto-Fetch Plan for Ch {chap_num}"):
         with st.spinner("Fetching..."):
-            p = f"Access Outline. Copy section for **Chapter {chap_num}** VERBATIM. Do not summarize."
+            p = f"Access Outline. Copy section for **Chapter {chap_num}** VERBATIM."
             try:
                 cn = get_or_create_cache(nc, no)
                 res = genai.GenerativeModel.from_cached_content(cached_content=genai.caching.CachedContent.get(name=cn)).generate_content(p) if cn else model.generate_content(f"{no}\n\n{p}")
                 st.session_state[f"pl_{chap_num}"] = res.text; st.rerun()
             except Exception as e: st.error(f"Error: {e}")
-    
     cp = st.session_state.get(f"pl_{chap_num}", "")
-    ci = st.text_area("Chapter Plan / Instructions", value=cp, height=150)
-
+    ci = st.text_area("Chapter Plan", value=cp, height=150)
     if not st.session_state.editor_mode:
-        btn_label = f"🚀 Write Chapter {chap_num}" if chap_num not in existing_chapters else f"🔄 Re-Write Chapter {chap_num}"
-        if st.button(btn_label, type="primary"):
+        btn = f"🚀 Write Ch {chap_num}" if chap_num not in existing_chapters else f"🔄 Re-Write Ch {chap_num}"
+        if st.button(btn, type="primary"):
             with st.spinner("Writing..."):
-                cn = get_or_create_cache(nc, no)
-                prev_text = chapter_data[-1]['content'][-3000:] if chapter_data else ""
-                dp = f"### CONTEXT\n{rolling_sum}\n### PREV TEXT\n...{prev_text}\n### PLAN\n{ci}\n### TASK\nWrite Ch {chap_num}. Use Markdown headers."
+                cn = get_or_create_cache(nc, no); prev = chapter_data[-1]['content'][-3000:] if chapter_data else ""
+                dp = f"### CONTEXT\n{rolling_sum}\n### PREV TEXT\n...{prev}\n### PLAN\n{ci}\n### TASK\nWrite Ch {chap_num}."
                 try:
                     res = genai.GenerativeModel.from_cached_content(cached_content=genai.caching.CachedContent.get(name=cn), safety_settings=safety_settings).generate_content(dp) if cn else model.generate_content(f"{nc}\n{no}\n{dp}")
                     st.session_state.ed_con = normalize_text(res.text); st.session_state.editor_mode = True; st.rerun()
                 except Exception as e: st.error(f"Error: {e}")
     else:
-        st.info(f"📝 Editing Chapter {chap_num}")
+        st.info(f"📝 Editing Ch {chap_num}")
         tab_edit, tab_prev = st.tabs(["✍️ Edit", "👁️ Preview"])
         with tab_edit: et = st.text_area("Content", value=st.session_state.ed_con, height=600, key="ed_con_ta")
         with tab_prev: st.markdown(et)
@@ -382,29 +350,16 @@ with t2:
                     sm = generate_summary(et); save_chapter(st.session_state.active_book_id, chap_num, et, sm)
                     st.session_state.editor_mode = False; del st.session_state.ed_con; st.rerun()
         with c2:
-            if st.button("❌ Discard"):
-                st.session_state.editor_mode = False; del st.session_state.ed_con; st.rerun()
+            if st.button("❌ Discard"): st.session_state.editor_mode = False; del st.session_state.ed_con; st.rerun()
 
-    if history_list and not st.session_state.editor_mode:
-        st.divider()
-        if st.button("Undo Last Added Chapter"):
-            delete_last_chapter(st.session_state.active_book_id, len(history_list)); st.rerun()
-        l = history_list[-1]
-        with st.expander(f"Last Saved: Ch {l['chapter_num']}"):
-            st.info(l['summary']); st.markdown(l['content'])
-
-# TAB 3: MANUSCRIPT
 with t3:
-    c1, c2 = st.columns([1,1])
-    with c1: 
-        if st.button("📄 Export Word"):
-            d = create_docx(full_text, current_title); b = BytesIO(); d.save(b); b.seek(0)
-            st.download_button("Download", b, f"{current_title}.docx")
+    if st.button("📄 Export Word"):
+        d = create_docx(full_text, current_title); b = BytesIO(); d.save(b); b.seek(0)
+        st.download_button("Download", b, f"{current_title}.docx")
     mt1, mt2 = st.tabs(["📖 Reading View", "📝 Raw Text"])
     with mt1: st.markdown(full_text)
     with mt2: st.text_area("Manuscript", value=full_text, height=600)
 
-# TAB 4: PUBLISHER
 with t4:
     if st.button("🧬 Analyze DNA"):
         with st.spinner("Analyzing..."):
@@ -414,50 +369,87 @@ with t4:
             except Exception as e: st.error(f"Error: {e}")
     if "dna_res" in st.session_state: st.info(st.session_state.dna_res)
 
-# TAB 5: EDITOR
+# --- TAB 5: SMART EDITOR WITH APPLY BUTTON ---
 with t5:
-    st.header("🧐 Smart Internal Consistency Editor")
-    st.markdown("This scan treats your **Manuscript** as the new truth. It looks for contradictions within the text and proposes the **easiest possible fixes**.")
-    strict_config = genai.types.GenerationConfig(temperature=0.2, top_p=0.95, max_output_tokens=65000)
+    st.header("🧐 Smart Consistency Editor")
+    st.markdown("Scans for internal contradictions and allows you to **Apply Fixes** directly to the database.")
     
-    if st.button("🔍 Run Full Internal Logic Scan"):
-        if len(full_text) < 500: st.error("Manuscript too short to scan.")
+    def apply_minimal_fix(chap_num, old_text, new_text):
+        conn = sqlite3.connect(DB_NAME)
+        c = conn.cursor()
+        c.execute("SELECT content FROM chapters WHERE book_id=? AND chapter_num=?", (st.session_state.active_book_id, chap_num))
+        row = c.fetchone()
+        if row:
+            current_content = row[0]
+            # Precise string replacement
+            updated_content = current_content.replace(old_text.strip(), new_text.strip())
+            
+            if updated_content != current_content:
+                # Update content and auto-re-summarize
+                new_sum = generate_summary(updated_content)
+                c.execute("UPDATE chapters SET content=?, summary=? WHERE book_id=? AND chapter_num=?", 
+                          (updated_content, new_sum, st.session_state.active_book_id, chap_num))
+                conn.commit()
+                st.success(f"Fixed Ch {chap_num}!")
+                time.sleep(1)
+            else:
+                st.warning(f"Could not find exact text match in Ch {chap_num}.")
+        conn.close()
+
+    strict_config = genai.types.GenerationConfig(temperature=0.1, top_p=0.95, max_output_tokens=65000)
+    
+    if st.button("🔍 Run Full Logic Scan"):
+        if len(full_text) < 500: st.error("Manuscript too short.")
         else:
-            with st.spinner("Analyzing manuscript and calculating minimal fixes..."):
-                prompt = f"""You are a high-level Continuity Editor. 
-Your ONLY source of truth is the MANUSCRIPT text provided below. 
-The story may have evolved away from the original outline; your job is to ensure the story doesn't contradict ITSELF across chapters.
+            with st.spinner("Analyzing and calculating fixes..."):
+                prompt = f"""You are a Continuity Editor. 
+Your ONLY truth is the MANUSCRIPT text provided. 
+Identify logic breaks (contradicting eye color, wounds, etc.) and propose MINIMAL FIXES.
 
 ### THE MANUSCRIPT
 {full_text}
 
 ### YOUR TASK
-1. Identify logic breaks where a fact in one chapter contradicts a fact in another (e.g., character traits, physical locations, wounds, inventory, or time of day).
-2. Look for "teleportation" errors or rules of physics being broken.
-3. For EVERY contradiction found, propose a "Minimal Fix." This must be a specific suggestion that resolves the issue while changing the FEWEST amount of words possible (ideally a single sentence tweak in the later chapter to align it with the earlier one).
+1. List contradictions with Evidence A and B.
+2. For EVERY contradiction, provide a raw implementation instruction at the end of the report.
 
 ### OUTPUT FORMAT
-Provide the report as:
-**[Contradiction Type]:** [Short Summary]
-* **Evidence A:** "[Quote sentence from earlier chapter]"
-* **Evidence B:** "[Quote sentence from later chapter that contradicts it]"
-* **Verdict:** [Short explanation of why this is a logic break]
-* **Minimal Fix:** [The exact sentence change or insertion needed to fix it with the least amount of disruption to your current writing.]
+[Narrative Report Here]
 
-If everything is consistent, write "NO INTERNAL CONTRADICTIONS FOUND."
+---FIX_BLOCK---
+[
+  {{"chapter": 1, "find": "old sentence", "replace": "new sentence"}},
+  ...
+]
+---END_FIX_BLOCK---
 """
                 try:
                     cn = get_or_create_cache(nc, no)
                     response = genai.GenerativeModel.from_cached_content(cached_content=genai.caching.CachedContent.get(name=cn)).generate_content(prompt, generation_config=strict_config) if cn else model.generate_content(prompt, generation_config=strict_config)
                     
                     if hasattr(response, 'text') and response.text:
-                        st.session_state.editor_report = response.text; st.rerun()
-                    elif response.candidates[0].finish_reason == 2:
-                        partial = response.candidates[0].content.parts[0].text
-                        st.session_state.editor_report = partial + "\n\n⚠️ **SCAN TRUNCATED (Report too long)**"; st.rerun()
-                    else:
-                        st.error(f"Scan failed. Reason: {response.candidates[0].finish_reason}")
-                except Exception as e: st.error(f"Detailed Error: {e}")
+                        st.session_state.editor_report = response.text
+                        # Attempt to extract JSON fix block
+                        try:
+                            json_str = response.text.split("---FIX_BLOCK---")[1].split("---END_FIX_BLOCK---")[0]
+                            st.session_state.parsed_fixes = json.loads(json_str)
+                        except:
+                            st.session_state.parsed_fixes = []
+                        st.rerun()
+                except Exception as e: st.error(f"Error: {e}")
 
     if "editor_report" in st.session_state:
-        st.divider(); st.markdown(st.session_state.editor_report)
+        st.markdown(st.session_state.editor_report.split("---FIX_BLOCK---")[0])
+        
+        if st.session_state.get("parsed_fixes"):
+            st.divider()
+            st.subheader("🛠️ Implementation Steps")
+            for i, fix in enumerate(st.session_state.parsed_fixes):
+                with st.expander(f"Fix for Chapter {fix['chapter']}"):
+                    st.warning(f"**Find:** {fix['find']}")
+                    st.success(f"**Replace:** {fix['replace']}")
+                    if st.button("Apply this Fix", key=f"apply_{i}"):
+                        apply_minimal_fix(fix['chapter'], fix['find'], fix['replace'])
+                        # Remove from session state after apply
+                        st.session_state.parsed_fixes.pop(i)
+                        st.rerun()
