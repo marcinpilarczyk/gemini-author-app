@@ -6,6 +6,7 @@ import datetime
 import re
 import sqlite3
 import json
+import os
 from docx import Document
 from io import BytesIO
 import time
@@ -91,7 +92,6 @@ def save_chapter(book_id, num, content, summary=""):
         current_sum = summary if summary else (existing[1] if existing[1] else "")
         c.execute("UPDATE chapters SET content=?, summary=? WHERE id=?", (content, current_sum, existing[0]))
     else:
-        # Insert new chapter
         c.execute("INSERT INTO chapters (book_id, chapter_num, content, summary) VALUES (?, ?, ?, ?)", 
                   (book_id, num, content, summary))
     conn.commit()
@@ -105,12 +105,9 @@ def delete_last_chapter(book_id, num):
     conn.close()
 
 def reset_db():
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("DROP TABLE IF EXISTS books")
-    c.execute("DROP TABLE IF EXISTS chapters")
-    conn.commit()
-    conn.close()
+    if os.path.exists(DB_NAME):
+        os.remove(DB_NAME)
+    init_db()
 
 init_db()
 
@@ -207,9 +204,11 @@ with st.sidebar:
     all_books = get_all_books()
     if not all_books:
         first_id = create_new_book("My First Book"); st.session_state.active_book_id = first_id; st.rerun()
-    if "active_book_id" not in st.session_state: st.session_state.active_book_id = all_books[0]['id']
-    book_opts = {b['id']: b['title'] for b in all_books}
     
+    if "active_book_id" not in st.session_state:
+        st.session_state.active_book_id = all_books[0]['id']
+    
+    book_opts = {b['id']: b['title'] for b in all_books}
     try:
         current_book_index = list(book_opts.keys()).index(st.session_state.active_book_id)
     except ValueError:
@@ -228,6 +227,22 @@ with st.sidebar:
 
     st.divider()
     
+    with st.expander("💾 Backup & Restore"):
+        st.caption("Since the server is temporary, download your database to save your work permanently.")
+        if os.path.exists(DB_NAME):
+            with open(DB_NAME, "rb") as f:
+                st.download_button("📥 Download Database (.db)", f, file_name=f"author_studio_backup_{datetime.date.today()}.db")
+        
+        st.divider()
+        uploaded_db = st.file_uploader("📤 Restore from Backup", type="db")
+        if uploaded_db:
+            if st.button("Overwrite Current with Backup"):
+                with open(DB_NAME, "wb") as f:
+                    f.write(uploaded_db.getbuffer())
+                st.success("Project Restored! Reloading...")
+                time.sleep(1)
+                st.rerun()
+
     with st.expander("⚠️ Import Manuscript"):
         imp_txt = st.text_area("Paste Full Text (Will split by 'Chapter X')", height=200)
         if st.button("Import"):
@@ -293,7 +308,6 @@ current_outline = active_book['outline']
 full_text = ""
 rolling_sum = ""
 existing_chapters = {}
-# FIX: Restored history_list to ensure Writer tab displays history
 history_list = []
 
 for r in chapter_data:
@@ -346,7 +360,6 @@ with t2:
         if st.button(btn_label, type="primary"):
             with st.spinner("Writing..."):
                 cn = get_or_create_cache(nc, no)
-                # Use context from previous chapters
                 prev_text = existing_chapters.get(chap_num - 1, "")[-3000:] if chap_num > 1 else ""
                 dp = f"### CONTEXT\n{rolling_sum}\n### PREV TEXT\n...{prev_text}\n### PLAN\n{ci}\n### TASK\nWrite Ch {chap_num}. Use Markdown headers."
                 try:
@@ -368,40 +381,27 @@ with t2:
             if st.button("❌ Discard"):
                 st.session_state.editor_mode = False; del st.session_state.ed_con; st.rerun()
 
-    # --- RESTORED HISTORY VIEW ---
     if not st.session_state.editor_mode:
         st.divider()
-        # Find the previous chapter specifically for context
         prev_chap_idx = chap_num - 1
-        
-        # Display the Immediate Previous Chapter (Context)
         if prev_chap_idx in existing_chapters:
-            # Find the summary for it
-            prev_summary = next((r['summary'] for r in history_list if r['chapter_num'] == prev_chap_idx), "No summary available.")
-            with st.expander(f"⬅️ Reference: Chapter {prev_chap_idx} (Previous)", expanded=False):
-                st.caption("Continuity Ledger:")
-                st.info(prev_summary)
-                st.markdown(existing_chapters[prev_chap_idx])
+            prev_summary = next((r['summary'] for r in history_list if r['chapter_num'] == prev_chap_idx), "No summary.")
+            with st.expander(f"⬅️ Reference: Chapter {prev_chap_idx} (Previous)"):
+                st.info(prev_summary); st.markdown(existing_chapters[prev_chap_idx])
         
-        # Display all other saved chapters
         if history_list:
             with st.expander("📚 View All Saved Chapters"):
-                if st.button("Undo Last Added Chapter (Absolute Last)"):
-                    delete_last_chapter(st.session_state.active_book_id, history_list[-1]['chapter_num'])
-                    st.rerun()
+                if st.button("Undo Last Chapter Addition"):
+                    delete_last_chapter(st.session_state.active_book_id, history_list[-1]['chapter_num']); st.rerun()
                 for h in reversed(history_list):
-                    if h['chapter_num'] != prev_chap_idx: # Don't duplicate if already shown above
-                        with st.expander(f"Ch {h['chapter_num']} View"):
-                            st.info(h['summary'])
-                            st.markdown(h['content'])
+                    with st.expander(f"Ch {h['chapter_num']} View"):
+                        st.info(h['summary']); st.markdown(h['content'])
 
 # TAB 3: MANUSCRIPT
 with t3:
-    c1, c2 = st.columns([1,1])
-    with c1: 
-        if st.button("📄 Export Word"):
-            d = create_docx(full_text, current_title); b = BytesIO(); d.save(b); b.seek(0)
-            st.download_button("Download", b, f"{current_title}.docx")
+    if st.button("📄 Export Word"):
+        d = create_docx(full_text, current_title); b = BytesIO(); d.save(b); b.seek(0)
+        st.download_button("Download", b, f"{current_title}.docx")
     mt1, mt2 = st.tabs(["📖 Reading View", "📝 Raw Text"])
     with mt1: st.markdown(full_text)
     with mt2: st.text_area("Manuscript", value=full_text, height=600)
@@ -419,80 +419,52 @@ with t4:
 # TAB 5: EDITOR
 with t5:
     st.header("🧐 Smart Consistency Editor")
-    st.markdown("Scans for internal contradictions and allows you to **Apply Fixes** directly to the database.")
-    
     def apply_minimal_fix(chap_num, old_text, new_text):
-        conn = sqlite3.connect(DB_NAME)
-        c = conn.cursor()
+        conn = sqlite3.connect(DB_NAME); c = conn.cursor()
         c.execute("SELECT content FROM chapters WHERE book_id=? AND chapter_num=?", (st.session_state.active_book_id, chap_num))
         row = c.fetchone()
         if row:
-            current_content = row[0]
-            updated_content = current_content.replace(old_text.strip(), new_text.strip())
-            
-            if updated_content != current_content:
-                new_sum = generate_summary(updated_content)
-                c.execute("UPDATE chapters SET content=?, summary=? WHERE book_id=? AND chapter_num=?", 
-                          (updated_content, new_sum, st.session_state.active_book_id, chap_num))
-                conn.commit()
-                st.success(f"Fixed Ch {chap_num}!")
-                time.sleep(1)
-            else:
-                st.warning(f"Could not find exact text match in Ch {chap_num}.")
+            updated = row[0].replace(old_text.strip(), new_text.strip())
+            if updated != row[0]:
+                ns = generate_summary(updated)
+                c.execute("UPDATE chapters SET content=?, summary=? WHERE book_id=? AND chapter_num=?", (updated, ns, st.session_state.active_book_id, chap_num))
+                conn.commit(); st.success(f"Fixed Ch {chap_num}!"); time.sleep(1)
+            else: st.warning("Exact match not found.")
         conn.close()
 
     strict_config = genai.types.GenerationConfig(temperature=0.1, top_p=0.95, max_output_tokens=65000)
-    
     if st.button("🔍 Run Full Logic Scan"):
-        if len(full_text) < 500: st.error("Manuscript too short.")
+        if len(full_text) < 500: st.error("Too short.")
         else:
-            with st.spinner("Analyzing and calculating fixes..."):
-                prompt = f"""You are a Continuity Editor. 
-Your ONLY truth is the MANUSCRIPT text provided. 
-Identify logic breaks (contradicting eye color, wounds, etc.) and propose MINIMAL FIXES.
-
-### THE MANUSCRIPT
-{full_text}
-
-### YOUR TASK
-1. List contradictions with Evidence A and B.
-2. For EVERY contradiction, provide a raw implementation instruction at the end of the report.
-
-### OUTPUT FORMAT
-[Narrative Report Here]
-
----FIX_BLOCK---
-[
-  {{"chapter": 1, "find": "old sentence", "replace": "new sentence"}},
-  ...
-]
----END_FIX_BLOCK---
-"""
+            with st.spinner("Analyzing..."):
+                prompt = f"""You are a Continuity Editor. Identify logic breaks and propose MINIMAL FIXES.
+                ### THE MANUSCRIPT
+                {full_text}
+                
+                OUTPUT FORMAT:
+                [Narrative Report]
+                ---FIX_BLOCK---
+                [ {{"chapter": 1, "find": "old text", "replace": "new text"}} ]
+                ---END_FIX_BLOCK---
+                """
                 try:
                     cn = get_or_create_cache(nc, no)
                     response = genai.GenerativeModel.from_cached_content(cached_content=genai.caching.CachedContent.get(name=cn)).generate_content(prompt, generation_config=strict_config) if cn else model.generate_content(prompt, generation_config=strict_config)
-                    
                     if hasattr(response, 'text') and response.text:
                         st.session_state.editor_report = response.text
                         try:
-                            json_str = response.text.split("---FIX_BLOCK---")[1].split("---END_FIX_BLOCK---")[0]
-                            st.session_state.parsed_fixes = json.loads(json_str)
-                        except:
-                            st.session_state.parsed_fixes = []
+                            st.session_state.parsed_fixes = json.loads(response.text.split("---FIX_BLOCK---")[1].split("---END_FIX_BLOCK---")[0])
+                        except: st.session_state.parsed_fixes = []
                         st.rerun()
                 except Exception as e: st.error(f"Error: {e}")
 
     if "editor_report" in st.session_state:
         st.markdown(st.session_state.editor_report.split("---FIX_BLOCK---")[0])
-        
         if st.session_state.get("parsed_fixes"):
-            st.divider()
-            st.subheader("🛠️ Implementation Steps")
+            st.divider(); st.subheader("🛠️ Propose Fixes")
             for i, fix in enumerate(st.session_state.parsed_fixes):
-                with st.expander(f"Fix for Chapter {fix['chapter']}"):
-                    st.warning(f"**Find:** {fix['find']}")
-                    st.success(f"**Replace:** {fix['replace']}")
-                    if st.button("Apply this Fix", key=f"apply_{fix['chapter']}_{i}"):
+                with st.expander(f"Ch {fix['chapter']} Suggestion"):
+                    st.write(f"**Find:** {fix['find']}"); st.write(f"**Replace:** {fix['replace']}")
+                    if st.button("Apply", key=f"app_{fix['chapter']}_{i}"):
                         apply_minimal_fix(fix['chapter'], fix['find'], fix['replace'])
-                        st.session_state.parsed_fixes.pop(i)
-                        st.rerun()
+                        st.session_state.parsed_fixes.pop(i); st.rerun()
