@@ -91,6 +91,7 @@ def save_chapter(book_id, num, content, summary=""):
         current_sum = summary if summary else (existing[1] if existing[1] else "")
         c.execute("UPDATE chapters SET content=?, summary=? WHERE id=?", (content, current_sum, existing[0]))
     else:
+        # Insert new chapter
         c.execute("INSERT INTO chapters (book_id, chapter_num, content, summary) VALUES (?, ?, ?, ?)", 
                   (book_id, num, content, summary))
     conn.commit()
@@ -292,7 +293,11 @@ current_outline = active_book['outline']
 full_text = ""
 rolling_sum = ""
 existing_chapters = {}
+# FIX: Restored history_list to ensure Writer tab displays history
+history_list = []
+
 for r in chapter_data:
+    history_list.append(r)
     existing_chapters[r['chapter_num']] = r['content']
     full_text += f"\n\n## Chapter {r['chapter_num']}\n\n{r['content']}"
     if r['summary']: rolling_sum += f"\n\n**Ch {r['chapter_num']}:**\n{r['summary']}"
@@ -300,6 +305,7 @@ for r in chapter_data:
 st.subheader(f"📖 {current_title}")
 t1, t2, t3, t4, t5 = st.tabs(["1. Bible", "2. Writer", "3. Manuscript", "4. Publisher", "5. Editor"])
 
+# TAB 1: BIBLE
 with t1:
     c1, c2 = st.columns(2)
     with c1: nti = st.text_input("Title", value=current_title); nc = st.text_area("Concept", value=current_concept, height=500)
@@ -307,16 +313,21 @@ with t1:
     if nc!=current_concept or no!=current_outline or nti!=current_title:
         if st.button("💾 Save Bible"): update_book_meta(st.session_state.active_book_id, nti, nc, no); st.rerun()
 
+# TAB 2: WRITER
 with t2:
-    if "selected_chap" not in st.session_state: st.session_state.selected_chap = len(chapter_data) + 1
+    if "selected_chap" not in st.session_state: st.session_state.selected_chap = len(history_list) + 1
     if "editor_mode" not in st.session_state: st.session_state.editor_mode = False
+    
     c_sel1, c_sel2 = st.columns([1, 4])
-    with c_sel1: chap_num = st.number_input("Chapter #", min_value=1, value=st.session_state.selected_chap, step=1); st.session_state.selected_chap = chap_num
+    with c_sel1:
+        chap_num = st.number_input("Chapter #", min_value=1, value=st.session_state.selected_chap, step=1)
+        st.session_state.selected_chap = chap_num
     with c_sel2:
         st.write(""); st.write("")
         if chap_num in existing_chapters and not st.session_state.editor_mode:
-            if st.button(f"✏️ Load Chapter {chap_num}"):
+            if st.button(f"✏️ Load Chapter {chap_num} for Editing"):
                 st.session_state.ed_con = existing_chapters[chap_num]; st.session_state.editor_mode = True; st.rerun()
+    
     st.divider()
     if st.button(f"🔮 Auto-Fetch Plan for Ch {chap_num}"):
         with st.spinner("Fetching..."):
@@ -326,20 +337,24 @@ with t2:
                 res = genai.GenerativeModel.from_cached_content(cached_content=genai.caching.CachedContent.get(name=cn)).generate_content(p) if cn else model.generate_content(f"{no}\n\n{p}")
                 st.session_state[f"pl_{chap_num}"] = res.text; st.rerun()
             except Exception as e: st.error(f"Error: {e}")
+    
     cp = st.session_state.get(f"pl_{chap_num}", "")
-    ci = st.text_area("Chapter Plan", value=cp, height=150)
+    ci = st.text_area("Chapter Plan / Instructions", value=cp, height=150)
+
     if not st.session_state.editor_mode:
-        btn = f"🚀 Write Ch {chap_num}" if chap_num not in existing_chapters else f"🔄 Re-Write Ch {chap_num}"
-        if st.button(btn, type="primary"):
+        btn_label = f"🚀 Write Chapter {chap_num}" if chap_num not in existing_chapters else f"🔄 Re-Write Chapter {chap_num}"
+        if st.button(btn_label, type="primary"):
             with st.spinner("Writing..."):
-                cn = get_or_create_cache(nc, no); prev = chapter_data[-1]['content'][-3000:] if chapter_data else ""
-                dp = f"### CONTEXT\n{rolling_sum}\n### PREV TEXT\n...{prev}\n### PLAN\n{ci}\n### TASK\nWrite Ch {chap_num}."
+                cn = get_or_create_cache(nc, no)
+                # Use context from previous chapters
+                prev_text = existing_chapters.get(chap_num - 1, "")[-3000:] if chap_num > 1 else ""
+                dp = f"### CONTEXT\n{rolling_sum}\n### PREV TEXT\n...{prev_text}\n### PLAN\n{ci}\n### TASK\nWrite Ch {chap_num}. Use Markdown headers."
                 try:
                     res = genai.GenerativeModel.from_cached_content(cached_content=genai.caching.CachedContent.get(name=cn), safety_settings=safety_settings).generate_content(dp) if cn else model.generate_content(f"{nc}\n{no}\n{dp}")
                     st.session_state.ed_con = normalize_text(res.text); st.session_state.editor_mode = True; st.rerun()
                 except Exception as e: st.error(f"Error: {e}")
     else:
-        st.info(f"📝 Editing Ch {chap_num}")
+        st.info(f"📝 Editing Chapter {chap_num}")
         tab_edit, tab_prev = st.tabs(["✍️ Edit", "👁️ Preview"])
         with tab_edit: et = st.text_area("Content", value=st.session_state.ed_con, height=600, key="ed_con_ta")
         with tab_prev: st.markdown(et)
@@ -350,16 +365,48 @@ with t2:
                     sm = generate_summary(et); save_chapter(st.session_state.active_book_id, chap_num, et, sm)
                     st.session_state.editor_mode = False; del st.session_state.ed_con; st.rerun()
         with c2:
-            if st.button("❌ Discard"): st.session_state.editor_mode = False; del st.session_state.ed_con; st.rerun()
+            if st.button("❌ Discard"):
+                st.session_state.editor_mode = False; del st.session_state.ed_con; st.rerun()
 
+    # --- RESTORED HISTORY VIEW ---
+    if not st.session_state.editor_mode:
+        st.divider()
+        # Find the previous chapter specifically for context
+        prev_chap_idx = chap_num - 1
+        
+        # Display the Immediate Previous Chapter (Context)
+        if prev_chap_idx in existing_chapters:
+            # Find the summary for it
+            prev_summary = next((r['summary'] for r in history_list if r['chapter_num'] == prev_chap_idx), "No summary available.")
+            with st.expander(f"⬅️ Reference: Chapter {prev_chap_idx} (Previous)", expanded=False):
+                st.caption("Continuity Ledger:")
+                st.info(prev_summary)
+                st.markdown(existing_chapters[prev_chap_idx])
+        
+        # Display all other saved chapters
+        if history_list:
+            with st.expander("📚 View All Saved Chapters"):
+                if st.button("Undo Last Added Chapter (Absolute Last)"):
+                    delete_last_chapter(st.session_state.active_book_id, history_list[-1]['chapter_num'])
+                    st.rerun()
+                for h in reversed(history_list):
+                    if h['chapter_num'] != prev_chap_idx: # Don't duplicate if already shown above
+                        with st.expander(f"Ch {h['chapter_num']} View"):
+                            st.info(h['summary'])
+                            st.markdown(h['content'])
+
+# TAB 3: MANUSCRIPT
 with t3:
-    if st.button("📄 Export Word"):
-        d = create_docx(full_text, current_title); b = BytesIO(); d.save(b); b.seek(0)
-        st.download_button("Download", b, f"{current_title}.docx")
+    c1, c2 = st.columns([1,1])
+    with c1: 
+        if st.button("📄 Export Word"):
+            d = create_docx(full_text, current_title); b = BytesIO(); d.save(b); b.seek(0)
+            st.download_button("Download", b, f"{current_title}.docx")
     mt1, mt2 = st.tabs(["📖 Reading View", "📝 Raw Text"])
     with mt1: st.markdown(full_text)
     with mt2: st.text_area("Manuscript", value=full_text, height=600)
 
+# TAB 4: PUBLISHER
 with t4:
     if st.button("🧬 Analyze DNA"):
         with st.spinner("Analyzing..."):
@@ -369,7 +416,7 @@ with t4:
             except Exception as e: st.error(f"Error: {e}")
     if "dna_res" in st.session_state: st.info(st.session_state.dna_res)
 
-# --- TAB 5: SMART EDITOR WITH APPLY BUTTON ---
+# TAB 5: EDITOR
 with t5:
     st.header("🧐 Smart Consistency Editor")
     st.markdown("Scans for internal contradictions and allows you to **Apply Fixes** directly to the database.")
@@ -381,11 +428,9 @@ with t5:
         row = c.fetchone()
         if row:
             current_content = row[0]
-            # Precise string replacement
             updated_content = current_content.replace(old_text.strip(), new_text.strip())
             
             if updated_content != current_content:
-                # Update content and auto-re-summarize
                 new_sum = generate_summary(updated_content)
                 c.execute("UPDATE chapters SET content=?, summary=? WHERE book_id=? AND chapter_num=?", 
                           (updated_content, new_sum, st.session_state.active_book_id, chap_num))
@@ -429,7 +474,6 @@ Identify logic breaks (contradicting eye color, wounds, etc.) and propose MINIMA
                     
                     if hasattr(response, 'text') and response.text:
                         st.session_state.editor_report = response.text
-                        # Attempt to extract JSON fix block
                         try:
                             json_str = response.text.split("---FIX_BLOCK---")[1].split("---END_FIX_BLOCK---")[0]
                             st.session_state.parsed_fixes = json.loads(json_str)
@@ -448,8 +492,7 @@ Identify logic breaks (contradicting eye color, wounds, etc.) and propose MINIMA
                 with st.expander(f"Fix for Chapter {fix['chapter']}"):
                     st.warning(f"**Find:** {fix['find']}")
                     st.success(f"**Replace:** {fix['replace']}")
-                    if st.button("Apply this Fix", key=f"apply_{i}"):
+                    if st.button("Apply this Fix", key=f"apply_{fix['chapter']}_{i}"):
                         apply_minimal_fix(fix['chapter'], fix['find'], fix['replace'])
-                        # Remove from session state after apply
                         st.session_state.parsed_fixes.pop(i)
                         st.rerun()
