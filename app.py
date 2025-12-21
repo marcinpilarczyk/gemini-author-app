@@ -92,6 +92,7 @@ def save_chapter(book_id, num, content, summary=""):
         current_sum = summary if summary else (existing[1] if existing[1] else "")
         c.execute("UPDATE chapters SET content=?, summary=? WHERE id=?", (content, current_sum, existing[0]))
     else:
+        # Insert new chapter
         c.execute("INSERT INTO chapters (book_id, chapter_num, content, summary) VALUES (?, ?, ?, ?)", 
                   (book_id, num, content, summary))
     conn.commit()
@@ -367,15 +368,32 @@ with t2:
                     st.session_state.ed_con = normalize_text(res.text); st.session_state.editor_mode = True; st.rerun()
                 except Exception as e: st.error(f"Error: {e}")
     else:
+        # EDITOR MODE
         st.info(f"📝 Editing Chapter {chap_num}")
+        st.caption(f"Words: {len(st.session_state.ed_con.split())}")
+        
+        # --- RESTORED TIGHTENING BUTTONS ---
+        fcol1, fcol2 = st.columns([1,1])
+        with fcol1: 
+            sp = st.radio("Spacing", ["Standard", "Tight"], horizontal=True, key="edit_sp")
+        with fcol2:
+            st.write("")
+            if st.button("✨ Format/Tighten Text"):
+                mode = "tight" if "Tight" in sp else "standard"
+                st.session_state.ed_con = normalize_text(st.session_state.ed_con, mode)
+                st.rerun()
+
         tab_edit, tab_prev = st.tabs(["✍️ Edit", "👁️ Preview"])
-        with tab_edit: et = st.text_area("Content", value=st.session_state.ed_con, height=600, key="ed_con_ta")
-        with tab_prev: st.markdown(et)
+        with tab_edit: 
+            et = st.text_area("Content", value=st.session_state.ed_con, height=600, key="ed_con_ta")
+            st.session_state.ed_con = et # Sync session state with area
+        with tab_prev: st.markdown(st.session_state.ed_con)
+        
         c1, c2 = st.columns([1,4])
         with c1:
             if st.button("💾 Save"):
                 with st.spinner("Saving..."):
-                    sm = generate_summary(et); save_chapter(st.session_state.active_book_id, chap_num, et, sm)
+                    sm = generate_summary(st.session_state.ed_con); save_chapter(st.session_state.active_book_id, chap_num, st.session_state.ed_con, sm)
                     st.session_state.editor_mode = False; del st.session_state.ed_con; st.rerun()
         with c2:
             if st.button("❌ Discard"):
@@ -399,9 +417,27 @@ with t2:
 
 # TAB 3: MANUSCRIPT
 with t3:
-    if st.button("📄 Export Word"):
-        d = create_docx(full_text, current_title); b = BytesIO(); d.save(b); b.seek(0)
-        st.download_button("Download", b, f"{current_title}.docx")
+    mcol1, mcol2, mcol3 = st.columns([1,1,1])
+    with mcol1:
+        if st.button("📄 Export Word"):
+            d = create_docx(full_text, current_title); b = BytesIO(); d.save(b); b.seek(0)
+            st.download_button("Download", b, f"{current_title}.docx")
+    
+    # --- RESTORED GLOBAL TIGHTENING ---
+    with mcol2:
+        gsp = st.radio("Global Spacing", ["Standard", "Tight"], horizontal=True, key="glob_sp")
+    with mcol3:
+        st.write("")
+        if st.button("✨ Apply Global Format"):
+            mode = "tight" if "Tight" in gsp else "standard"
+            # Rebuild full_text locally with normalization
+            new_full = ""
+            for r in chapter_data:
+                norm_c = normalize_text(r['content'], mode)
+                new_full += f"\n\n## Chapter {r['chapter_num']}\n\n{norm_c}"
+            full_text = new_full
+            st.success("Manuscript View Tightened!")
+
     mt1, mt2 = st.tabs(["📖 Reading View", "📝 Raw Text"])
     with mt1: st.markdown(full_text)
     with mt2: st.text_area("Manuscript", value=full_text, height=600)
@@ -429,7 +465,9 @@ with t5:
                 ns = generate_summary(updated)
                 c.execute("UPDATE chapters SET content=?, summary=? WHERE book_id=? AND chapter_num=?", (updated, ns, st.session_state.active_book_id, chap_num))
                 conn.commit(); st.success(f"Fixed Ch {chap_num}!"); time.sleep(1)
-            else: st.warning("Exact match not found.")
+            else:
+                # Try a slightly looser match if exact match fails
+                st.warning("Exact match not found. Manual tweak may be required.")
         conn.close()
 
     strict_config = genai.types.GenerationConfig(temperature=0.1, top_p=0.95, max_output_tokens=65000)
@@ -454,7 +492,8 @@ with t5:
                         st.session_state.editor_report = response.text
                         try:
                             st.session_state.parsed_fixes = json.loads(response.text.split("---FIX_BLOCK---")[1].split("---END_FIX_BLOCK---")[0])
-                        except: st.session_state.parsed_fixes = []
+                        except:
+                            st.session_state.parsed_fixes = []
                         st.rerun()
                 except Exception as e: st.error(f"Error: {e}")
 
