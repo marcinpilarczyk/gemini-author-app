@@ -357,16 +357,23 @@ with t2:
     ci = st.text_area("Chapter Plan / Instructions", value=cp, height=150)
 
     if not st.session_state.editor_mode:
-        btn_label = f"🚀 Write Chapter {chap_num}" if chap_num not in existing_chapters else f"🔄 Re-Write Chapter {chap_num}"
-        if st.button(btn_label, type="primary"):
-            with st.spinner("Writing..."):
-                cn = get_or_create_cache(nc, no)
-                prev_text = existing_chapters.get(chap_num - 1, "")[-3000:] if chap_num > 1 else ""
-                dp = f"### CONTEXT\n{rolling_sum}\n### PREV TEXT\n...{prev_text}\n### PLAN\n{ci}\n### TASK\nWrite Ch {chap_num}. Use Markdown headers."
-                try:
-                    res = genai.GenerativeModel.from_cached_content(cached_content=genai.caching.CachedContent.get(name=cn), safety_settings=safety_settings).generate_content(dp) if cn else model.generate_content(f"{nc}\n{no}\n{dp}")
-                    st.session_state.ed_con = normalize_text(res.text); st.session_state.editor_mode = True; st.rerun()
-                except Exception as e: st.error(f"Error: {e}")
+        btn_col1, btn_col2 = st.columns([1,1])
+        with btn_col1:
+            btn_label = f"🚀 Write Chapter {chap_num}" if chap_num not in existing_chapters else f"🔄 Re-Write Chapter {chap_num}"
+            if st.button(btn_label, type="primary", use_container_width=True):
+                with st.spinner("Writing..."):
+                    cn = get_or_create_cache(nc, no)
+                    prev_text = existing_chapters.get(chap_num - 1, "")[-3000:] if chap_num > 1 else ""
+                    dp = f"### CONTEXT\n{rolling_sum}\n### PREV TEXT\n...{prev_text}\n### PLAN\n{ci}\n### TASK\nWrite Ch {chap_num}. Use Markdown headers."
+                    try:
+                        res = genai.GenerativeModel.from_cached_content(cached_content=genai.caching.CachedContent.get(name=cn), safety_settings=safety_settings).generate_content(dp) if cn else model.generate_content(f"{nc}\n{no}\n{dp}")
+                        st.session_state.ed_con = normalize_text(res.text); st.session_state.editor_mode = True; st.rerun()
+                    except Exception as e: st.error(f"Error: {e}")
+        with btn_col2:
+            if st.button("📝 Manual Entry", use_container_width=True):
+                st.session_state.ed_con = existing_chapters.get(chap_num, "")
+                st.session_state.editor_mode = True
+                st.rerun()
     else:
         # EDITOR MODE
         st.info(f"📝 Editing Chapter {chap_num}")
