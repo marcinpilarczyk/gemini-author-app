@@ -1,0 +1,1 @@
+"""Author Studio core package."""

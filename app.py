@@ -1,516 +1,374 @@
-import streamlit as st
-import google.generativeai as genai
-from google.generativeai import caching
-from google.generativeai.types import HarmCategory, HarmBlockThreshold
-import datetime
-import re
-import sqlite3
-import json
+from __future__ import annotations
+
+import datetime as dt
 import os
-from docx import Document
-from io import BytesIO
-import time
+from pathlib import Path
 
-# --- PAGE CONFIGURATION ---
-st.set_page_config(page_title="Gemini 3 Author Studio", layout="wide")
-st.title("Drafting with Gemini 3 Pro (Full Studio Edition)")
+import streamlit as st
 
-# --- DATABASE SETUP ---
-DB_NAME = "my_novel.db"
+from author_studio.ai import AuthorAI
+from author_studio.db import AuthorStudioDB
+from author_studio.export import manuscript_markdown, to_docx
+from author_studio.text import normalize_text, split_manuscript, word_count
 
-def init_db():
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS books (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    title TEXT DEFAULT 'Untitled Book',
-                    concept TEXT,
-                    outline TEXT
-                )''')
-    c.execute('''CREATE TABLE IF NOT EXISTS chapters (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    book_id INTEGER,
-                    chapter_num INTEGER,
-                    content TEXT,
-                    summary TEXT,
-                    FOREIGN KEY(book_id) REFERENCES books(id)
-                )''')
-    conn.commit()
-    conn.close()
 
-def get_all_books():
-    conn = sqlite3.connect(DB_NAME)
-    conn.row_factory = sqlite3.Row
-    c = conn.cursor()
-    c.execute("SELECT id, title FROM books ORDER BY id")
-    books = c.fetchall()
-    conn.close()
-    return books
+APP_NAME = "Author Studio"
+DB_PATH = Path(os.getenv("AUTHOR_STUDIO_DB", "author_studio.db"))
+MODEL_OPTIONS = ["gemini-3.1-pro-preview", "gemini-3.8-flash"]
 
-def create_new_book(title):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("INSERT INTO books (title, concept, outline) VALUES (?, '', '')", (title,))
-    new_id = c.lastrowid
-    conn.commit()
-    conn.close()
-    return new_id
+st.set_page_config(
+    page_title=APP_NAME,
+    page_icon="✦",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
-def load_active_book(book_id):
-    conn = sqlite3.connect(DB_NAME)
-    conn.row_factory = sqlite3.Row
-    c = conn.cursor()
-    c.execute("SELECT * FROM books WHERE id=?", (book_id,))
-    book = c.fetchone()
-    c.execute("SELECT * FROM chapters WHERE book_id=? ORDER BY chapter_num", (book_id,))
-    chapters = c.fetchall()
-    conn.close()
-    return book, chapters
+st.markdown(
+    """
+    <style>
+      :root { --studio-border: rgba(128, 128, 128, .22); }
+      .block-container { max-width: 1320px; padding-top: 2rem; padding-bottom: 4rem; }
+      [data-testid="stSidebar"] { border-right: 1px solid var(--studio-border); }
+      .studio-kicker { letter-spacing: .12em; text-transform: uppercase; opacity: .62; font-size: .78rem; }
+      .studio-title { font-size: 2.35rem; font-weight: 760; margin: .15rem 0 .4rem; line-height: 1.05; }
+      .studio-subtitle { max-width: 760px; opacity: .72; font-size: 1.03rem; margin-bottom: 1.4rem; }
+      .studio-card { border: 1px solid var(--studio-border); border-radius: 16px; padding: 1rem 1.1rem; }
+      div[data-testid="stMetric"] { border: 1px solid var(--studio-border); border-radius: 14px; padding: .85rem 1rem; }
+      div[data-testid="stTabs"] button p { font-size: .96rem; }
+      .small-muted { opacity: .65; font-size: .86rem; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
-def get_chapters(book_id):
-    conn = sqlite3.connect(DB_NAME)
-    conn.row_factory = sqlite3.Row
-    c = conn.cursor()
-    c.execute("SELECT * FROM chapters WHERE book_id=? ORDER BY chapter_num ASC", (book_id,))
-    chapters = c.fetchall()
-    conn.close()
-    return chapters
 
-def update_book_meta(book_id, title, concept, outline):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("UPDATE books SET title=?, concept=?, outline=? WHERE id=?", (title, concept, outline, book_id))
-    conn.commit()
-    conn.close()
-
-def save_chapter(book_id, num, content, summary=""):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("SELECT id, summary FROM chapters WHERE book_id=? AND chapter_num=?", (book_id, num))
-    existing = c.fetchone()
-    if existing:
-        current_sum = summary if summary else (existing[1] if existing[1] else "")
-        c.execute("UPDATE chapters SET content=?, summary=? WHERE id=?", (content, current_sum, existing[0]))
-    else:
-        # Insert new chapter
-        c.execute("INSERT INTO chapters (book_id, chapter_num, content, summary) VALUES (?, ?, ?, ?)", 
-                  (book_id, num, content, summary))
-    conn.commit()
-    conn.close()
-
-def delete_last_chapter(book_id, num):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("DELETE FROM chapters WHERE book_id=? AND chapter_num=?", (book_id, num))
-    conn.commit()
-    conn.close()
-
-def reset_db():
-    if os.path.exists(DB_NAME):
-        os.remove(DB_NAME)
-    init_db()
-
-init_db()
-
-# --- MODEL CONFIG ---
-MODEL_NAME = "gemini-3-pro-preview" 
-
-safety_settings = {
-    HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
-    HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
-    HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
-    HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
-}
-
-# --- HELPERS ---
-def generate_summary(chapter_text):
-    if not chapter_text or len(chapter_text.strip()) < 50: return ""
-    prompt = f"""Analyze the following chapter and provide a technical summary for an author's continuity ledger.
-    
-    Output Format:
-    1. Narrative Summary: A concise paragraph of what actually happened (the events and plot movements).
-    2. Facts/Items/Injuries: Key details (character descriptions, specific items found/used, new wounds, locations).
-    3. Pacing: Analysis of the scene's intensity shifts (Start, Middle, End).
-    
-    Chapter Text:
-    {chapter_text[:12000]}"""
-    
+def get_api_key() -> str:
     try:
-        model = genai.GenerativeModel(MODEL_NAME, safety_settings=safety_settings)
-        return model.generate_content(prompt).text
-    except Exception as e: return f"Error: {e}"
+        return st.secrets.get("GEMINI_API_KEY", "")
+    except Exception:
+        return ""
 
-def normalize_text(text, mode="standard"):
-    if not text: return ""
-    text = text.replace('\r\n', '\n').replace('\r', '\n')
-    paragraphs = re.split(r'\n\s*\n', text)
-    clean_paragraphs = [p.strip() for p in paragraphs if p.strip()]
-    if mode == "tight": return '\n'.join(clean_paragraphs)
-    else: return '\n\n'.join(clean_paragraphs)
 
-def create_docx(full_text, title):
-    doc = Document()
-    doc.add_heading(title, 0)
-    normalized = normalize_text(full_text, mode="standard")
-    paragraphs = normalized.split('\n\n')
-    for p_text in paragraphs:
-        if not p_text.strip(): continue
-        if p_text.startswith("## Chapter"):
-            doc.add_heading(p_text.replace("## ", "").strip(), level=1)
-        elif p_text.startswith("## "):
-            doc.add_heading(p_text.replace("## ", "").strip(), level=2)
-        else:
-            p = doc.add_paragraph()
-            parts = re.split(r'(\*\*[^*]+\*\*|\*[^*]+\*)', p_text)
-            for part in parts:
-                if part.startswith('**') and part.endswith('**') and len(part) > 4:
-                    run = p.add_run(part[2:-2]); run.bold = True
-                elif part.startswith('*') and part.endswith('*') and len(part) > 2:
-                    run = p.add_run(part[1:-1]); run.italic = True
-                else: p.add_run(part)
-    return doc
+def ai_client(api_key: str, model: str) -> AuthorAI:
+    return AuthorAI(api_key=api_key, model=model)
 
-def get_or_create_cache(bible_text, outline_text):
-    static_content = f"### BIBLE\n{bible_text}\n\n### OUTLINE\n{outline_text}"
-    if 'cache_name' in st.session_state:
-        try:
-            cache = genai.caching.CachedContent.get(name=st.session_state.cache_name)
-            cache.update(ttl=datetime.timedelta(hours=2))
-            return cache.name
-        except: del st.session_state.cache_name
-    try:
-        cache = genai.caching.CachedContent.create(
-            model=MODEL_NAME, display_name="book_bible_v1", contents=[static_content], ttl=datetime.timedelta(hours=2)
-        )
-        st.session_state.cache_name = cache.name
-        return cache.name
-    except: return None
 
-# --- SIDEBAR ---
+def build_continuity_ledger(chapters) -> str:
+    parts = []
+    for row in chapters:
+        if row["summary"]:
+            parts.append(f"Chapter {row['chapter_num']}:\n{row['summary']}")
+    return "\n\n".join(parts)
+
+
+def ensure_book(db: AuthorStudioDB) -> int:
+    books = db.list_books()
+    if not books:
+        return db.create_book("My First Book")
+    current = st.session_state.get("active_book_id")
+    valid_ids = {int(row["id"]) for row in books}
+    if current not in valid_ids:
+        current = int(books[0]["id"])
+        st.session_state.active_book_id = current
+    return int(current)
+
+
+def replace_exact_text(db: AuthorStudioDB, book_id: int, chapter_number: int, old: str, new: str, ai: AuthorAI) -> bool:
+    chapters = db.list_chapters(book_id)
+    row = next((r for r in chapters if int(r["chapter_num"]) == int(chapter_number)), None)
+    if not row or old.strip() not in row["content"]:
+        return False
+    updated = row["content"].replace(old.strip(), new.strip(), 1)
+    summary = ai.summarize_chapter(updated)
+    db.save_chapter(book_id, chapter_number, updated, summary)
+    return True
+
+
+db = AuthorStudioDB(DB_PATH)
+active_book_id = ensure_book(db)
+
 with st.sidebar:
-    st.header("🔑 Settings")
-    if "GOOGLE_API_KEY" in st.secrets: api_key = st.secrets["GOOGLE_API_KEY"]
-    else: api_key = st.text_input("Enter Google API Key", type="password")
-    
-    available_models = ["gemini-3-pro-preview", "gemini-3-flash-preview", "gemini-2.0-flash-exp", "gemini-1.5-pro-latest"]
-    if "model_name" not in st.session_state: st.session_state.model_name = available_models[0]
-    selected_model = st.selectbox("🤖 Engine", available_models, index=available_models.index(st.session_state.model_name))
-    if selected_model != st.session_state.model_name:
-        st.session_state.model_name = selected_model
-        st.session_state.cache_name = None; st.rerun()
-    MODEL_NAME = st.session_state.model_name
-    
-    st.divider()
-    st.subheader("📚 Library")
-    all_books = get_all_books()
-    if not all_books:
-        first_id = create_new_book("My First Book"); st.session_state.active_book_id = first_id; st.rerun()
-    
-    if "active_book_id" not in st.session_state:
-        st.session_state.active_book_id = all_books[0]['id']
-    
-    book_opts = {b['id']: b['title'] for b in all_books}
-    try:
-        current_book_index = list(book_opts.keys()).index(st.session_state.active_book_id)
-    except ValueError:
-        current_book_index = 0
-        
-    sel_id = st.selectbox("Current Book", options=book_opts.keys(), format_func=lambda x: book_opts[x], index=current_book_index)
-    if sel_id != st.session_state.active_book_id:
-        st.session_state.active_book_id = sel_id; st.session_state.cache_name = None; st.rerun()
+    st.markdown("### ✦ Author Studio")
+    st.caption("Continuity-aware drafting workspace")
 
-    with st.popover("➕ New Book"):
-        nt = st.text_input("Title", "Untitled")
-        if st.button("Create"):
-            nid = create_new_book(nt)
-            st.session_state.active_book_id = nid
+    api_key = get_api_key()
+    if not api_key:
+        api_key = st.text_input("Gemini API key", type="password", help="Used only for this session unless configured in Streamlit Secrets.")
+
+    model = st.selectbox("Model", MODEL_OPTIONS, index=0)
+
+    st.divider()
+    st.caption("LIBRARY")
+    books = db.list_books()
+    options = {int(row["id"]): row["title"] for row in books}
+    selected = st.selectbox(
+        "Current book",
+        options=list(options),
+        index=list(options).index(active_book_id),
+        format_func=lambda book_id: options[book_id],
+        label_visibility="collapsed",
+    )
+    if selected != active_book_id:
+        st.session_state.active_book_id = int(selected)
+        st.session_state.pop("editor_content", None)
+        st.rerun()
+
+    with st.popover("＋ New book", use_container_width=True):
+        new_title = st.text_input("Book title", placeholder="Untitled novel")
+        if st.button("Create book", type="primary", use_container_width=True):
+            new_id = db.create_book(new_title)
+            st.session_state.active_book_id = new_id
             st.rerun()
 
     st.divider()
-    
-    with st.expander("💾 Backup & Restore"):
-        st.caption("Since the server is temporary, download your database to save your work permanently.")
-        if os.path.exists(DB_NAME):
-            with open(DB_NAME, "rb") as f:
-                st.download_button("📥 Download Database (.db)", f, file_name=f"author_studio_backup_{datetime.date.today()}.db")
-        
-        st.divider()
-        uploaded_db = st.file_uploader("📤 Restore from Backup", type="db")
-        if uploaded_db:
-            if st.button("Overwrite Current with Backup"):
-                with open(DB_NAME, "wb") as f:
-                    f.write(uploaded_db.getbuffer())
-                st.success("Project Restored! Reloading...")
-                time.sleep(1)
-                st.rerun()
+    with st.expander("Backup & import"):
+        if DB_PATH.exists():
+            st.download_button(
+                "Download database",
+                data=DB_PATH.read_bytes(),
+                file_name=f"author-studio-{dt.date.today().isoformat()}.db",
+                mime="application/octet-stream",
+                use_container_width=True,
+            )
 
-    with st.expander("⚠️ Import Manuscript"):
-        imp_txt = st.text_area("Paste Full Text (Will split by 'Chapter X')", height=200)
-        if st.button("Import"):
-            if imp_txt:
-                conn = sqlite3.connect(DB_NAME)
-                c = conn.cursor()
-                c.execute("DELETE FROM chapters WHERE book_id=?", (st.session_state.active_book_id,))
-                chunks = re.split(r'(?i)(chapter\s+\d+)', imp_txt)
-                cn, cc = 0, ""
-                for ch in chunks:
-                    if re.match(r'(?i)chapter\s+\d+', ch.strip()):
-                        if cn > 0:
-                            cl = normalize_text(cc)
-                            if cl: c.execute("INSERT INTO chapters (book_id, chapter_num, content, summary) VALUES (?, ?, ?, ?)", (st.session_state.active_book_id, cn, cl, ""))
-                        cn += 1
-                        cc = ""
-                    else: cc += ch
-                if cn > 0:
-                    cl = normalize_text(cc)
-                    if cl: c.execute("INSERT INTO chapters (book_id, chapter_num, content, summary) VALUES (?, ?, ?, ?)", (st.session_state.active_book_id, cn, cl, ""))
-                conn.commit()
-                conn.close()
-                st.success("Imported!")
-                st.rerun()
+        uploaded_db = st.file_uploader("Restore database", type="db")
+        if uploaded_db and st.button("Restore this backup", use_container_width=True):
+            DB_PATH.write_bytes(uploaded_db.getvalue())
+            st.session_state.clear()
+            st.rerun()
 
-    with st.expander("⚡ Memory Management"):
-        overwrite_summaries = st.checkbox("Overwrite existing summaries", value=False)
-        if st.button("Process Summaries"):
-            if not api_key: st.error("Need Key")
+        pasted = st.text_area("Import manuscript", placeholder="Paste text with headings such as Chapter 1, Chapter 2…", height=140)
+        if st.button("Split and import", use_container_width=True, disabled=not pasted.strip()):
+            parsed = split_manuscript(pasted)
+            if not parsed:
+                st.error("I couldn't find chapter headings like ‘Chapter 1’. No data changed.")
             else:
-                genai.configure(api_key=api_key)
-                conn = sqlite3.connect(DB_NAME); conn.row_factory = sqlite3.Row
-                c = conn.cursor()
-                c.execute("SELECT * FROM chapters WHERE book_id=? AND content IS NOT NULL", (st.session_state.active_book_id,))
-                rows = c.fetchall()
-                if not rows: st.warning("No chapters found.")
-                else:
-                    bar = st.progress(0); status = st.empty()
-                    for i, r in enumerate(rows):
-                        if not r['summary'] or len(r['summary']) < 10 or overwrite_summaries:
-                            status.text(f"Summarizing Ch {r['chapter_num']}...")
-                            s = generate_summary(r['content'])
-                            if s and not s.startswith("Error"):
-                                c2 = conn.cursor()
-                                c2.execute("UPDATE chapters SET summary=? WHERE id=?", (s, r['id']))
-                                conn.commit()
-                        bar.progress((i+1)/len(rows))
-                    status.text("Done."); st.success("Backfill Complete!"); st.rerun()
-
-    if st.button("🔴 Reset Database"):
-        reset_db(); st.session_state.clear(); st.rerun()
-
-# --- MAIN LOGIC ---
-if not api_key: st.warning("👈 Enter API Key"); st.stop()
-genai.configure(api_key=api_key)
-model = genai.GenerativeModel(MODEL_NAME, safety_settings=safety_settings)
-
-active_book, chapter_data = load_active_book(st.session_state.active_book_id)
-current_title = active_book['title']
-current_concept = active_book['concept']
-current_outline = active_book['outline']
-
-full_text = ""
-rolling_sum = ""
-existing_chapters = {}
-history_list = []
-
-for r in chapter_data:
-    history_list.append(r)
-    existing_chapters[r['chapter_num']] = r['content']
-    full_text += f"\n\n## Chapter {r['chapter_num']}\n\n{r['content']}"
-    if r['summary']: rolling_sum += f"\n\n**Ch {r['chapter_num']}:**\n{r['summary']}"
-
-st.subheader(f"📖 {current_title}")
-t1, t2, t3, t4, t5 = st.tabs(["1. Bible", "2. Writer", "3. Manuscript", "4. Publisher", "5. Editor"])
-
-# TAB 1: BIBLE
-with t1:
-    c1, c2 = st.columns(2)
-    with c1: nti = st.text_input("Title", value=current_title); nc = st.text_area("Concept", value=current_concept, height=500)
-    with c2: st.write(""); st.write(""); no = st.text_area("Outline", value=current_outline, height=500)
-    if nc!=current_concept or no!=current_outline or nti!=current_title:
-        if st.button("💾 Save Bible"): update_book_meta(st.session_state.active_book_id, nti, nc, no); st.rerun()
-
-# TAB 2: WRITER
-with t2:
-    if "selected_chap" not in st.session_state: st.session_state.selected_chap = len(history_list) + 1
-    if "editor_mode" not in st.session_state: st.session_state.editor_mode = False
-    
-    c_sel1, c_sel2 = st.columns([1, 4])
-    with c_sel1:
-        chap_num = st.number_input("Chapter #", min_value=1, value=st.session_state.selected_chap, step=1)
-        st.session_state.selected_chap = chap_num
-    with c_sel2:
-        st.write(""); st.write("")
-        if chap_num in existing_chapters and not st.session_state.editor_mode:
-            if st.button(f"✏️ Load Chapter {chap_num} for Editing"):
-                st.session_state.ed_con = existing_chapters[chap_num]; st.session_state.editor_mode = True; st.rerun()
-    
-    st.divider()
-    if st.button(f"🔮 Auto-Fetch Plan for Ch {chap_num}"):
-        with st.spinner("Fetching..."):
-            p = f"Access Outline. Copy section for **Chapter {chap_num}** VERBATIM."
-            try:
-                cn = get_or_create_cache(nc, no)
-                res = genai.GenerativeModel.from_cached_content(cached_content=genai.caching.CachedContent.get(name=cn)).generate_content(p) if cn else model.generate_content(f"{no}\n\n{p}")
-                st.session_state[f"pl_{chap_num}"] = res.text; st.rerun()
-            except Exception as e: st.error(f"Error: {e}")
-    
-    cp = st.session_state.get(f"pl_{chap_num}", "")
-    ci = st.text_area("Chapter Plan / Instructions", value=cp, height=150)
-
-    if not st.session_state.editor_mode:
-        btn_col1, btn_col2 = st.columns([1,1])
-        with btn_col1:
-            btn_label = f"🚀 Write Chapter {chap_num}" if chap_num not in existing_chapters else f"🔄 Re-Write Chapter {chap_num}"
-            if st.button(btn_label, type="primary", use_container_width=True):
-                with st.spinner("Writing..."):
-                    cn = get_or_create_cache(nc, no)
-                    prev_text = existing_chapters.get(chap_num - 1, "")[-3000:] if chap_num > 1 else ""
-                    dp = f"### CONTEXT\n{rolling_sum}\n### PREV TEXT\n...{prev_text}\n### PLAN\n{ci}\n### TASK\nWrite Ch {chap_num}. Use Markdown headers."
-                    try:
-                        res = genai.GenerativeModel.from_cached_content(cached_content=genai.caching.CachedContent.get(name=cn), safety_settings=safety_settings).generate_content(dp) if cn else model.generate_content(f"{nc}\n{no}\n{dp}")
-                        st.session_state.ed_con = normalize_text(res.text); st.session_state.editor_mode = True; st.rerun()
-                    except Exception as e: st.error(f"Error: {e}")
-        with btn_col2:
-            if st.button("📝 Manual Entry", use_container_width=True):
-                st.session_state.ed_con = existing_chapters.get(chap_num, "")
-                st.session_state.editor_mode = True
-                st.rerun()
-    else:
-        # EDITOR MODE
-        st.info(f"📝 Editing Chapter {chap_num}")
-        st.caption(f"Words: {len(st.session_state.ed_con.split())}")
-        
-        # --- RESTORED TIGHTENING BUTTONS ---
-        fcol1, fcol2 = st.columns([1,1])
-        with fcol1: 
-            sp = st.radio("Spacing", ["Standard", "Tight"], horizontal=True, key="edit_sp")
-        with fcol2:
-            st.write("")
-            if st.button("✨ Format/Tighten Text"):
-                mode = "tight" if "Tight" in sp else "standard"
-                st.session_state.ed_con = normalize_text(st.session_state.ed_con, mode)
+                db.replace_chapters(active_book_id, parsed)
+                st.success(f"Imported {len(parsed)} chapters.")
                 st.rerun()
 
-        tab_edit, tab_prev = st.tabs(["✍️ Edit", "👁️ Preview"])
-        with tab_edit: 
-            et = st.text_area("Content", value=st.session_state.ed_con, height=600, key="ed_con_ta")
-            st.session_state.ed_con = et # Sync session state with area
-        with tab_prev: st.markdown(st.session_state.ed_con)
-        
-        c1, c2 = st.columns([1,4])
-        with c1:
-            if st.button("💾 Save"):
-                with st.spinner("Saving..."):
-                    sm = generate_summary(st.session_state.ed_con); save_chapter(st.session_state.active_book_id, chap_num, st.session_state.ed_con, sm)
-                    st.session_state.editor_mode = False; del st.session_state.ed_con; st.rerun()
-        with c2:
-            if st.button("❌ Discard"):
-                st.session_state.editor_mode = False; del st.session_state.ed_con; st.rerun()
+book = db.get_book(active_book_id)
+chapters = db.list_chapters(active_book_id)
+if not book:
+    st.error("The selected book no longer exists.")
+    st.stop()
 
-    if not st.session_state.editor_mode:
-        st.divider()
-        prev_chap_idx = chap_num - 1
-        if prev_chap_idx in existing_chapters:
-            prev_summary = next((r['summary'] for r in history_list if r['chapter_num'] == prev_chap_idx), "No summary.")
-            with st.expander(f"⬅️ Reference: Chapter {prev_chap_idx} (Previous)"):
-                st.info(prev_summary); st.markdown(existing_chapters[prev_chap_idx])
-        
-        if history_list:
-            with st.expander("📚 View All Saved Chapters"):
-                if st.button("Undo Last Chapter Addition"):
-                    delete_last_chapter(st.session_state.active_book_id, history_list[-1]['chapter_num']); st.rerun()
-                for h in reversed(history_list):
-                    with st.expander(f"Ch {h['chapter_num']} View"):
-                        st.info(h['summary']); st.markdown(h['content'])
+concept = book["concept"] or ""
+outline = book["outline"] or ""
+chapter_map = {int(row["chapter_num"]): row["content"] for row in chapters}
+continuity = build_continuity_ledger(chapters)
+full_manuscript = manuscript_markdown(chapters)
 
-# TAB 3: MANUSCRIPT
-with t3:
-    mcol1, mcol2, mcol3 = st.columns([1,1,1])
-    with mcol1:
-        if st.button("📄 Export Word"):
-            d = create_docx(full_text, current_title); b = BytesIO(); d.save(b); b.seek(0)
-            st.download_button("Download", b, f"{current_title}.docx")
-    
-    # --- RESTORED GLOBAL TIGHTENING ---
-    with mcol2:
-        gsp = st.radio("Global Spacing", ["Standard", "Tight"], horizontal=True, key="glob_sp")
-    with mcol3:
-        st.write("")
-        if st.button("✨ Apply Global Format"):
-            mode = "tight" if "Tight" in gsp else "standard"
-            # Rebuild full_text locally with normalization
-            new_full = ""
-            for r in chapter_data:
-                norm_c = normalize_text(r['content'], mode)
-                new_full += f"\n\n## Chapter {r['chapter_num']}\n\n{norm_c}"
-            full_text = new_full
-            st.success("Manuscript View Tightened!")
+st.markdown('<div class="studio-kicker">AI-assisted long-form writing</div>', unsafe_allow_html=True)
+st.markdown(f'<div class="studio-title">{book["title"]}</div>', unsafe_allow_html=True)
+st.markdown(
+    '<div class="studio-subtitle">Draft chapters, maintain continuity, inspect the manuscript as a whole, and export clean copy without losing the story state between sessions.</div>',
+    unsafe_allow_html=True,
+)
 
-    mt1, mt2 = st.tabs(["📖 Reading View", "📝 Raw Text"])
-    with mt1: st.markdown(full_text)
-    with mt2: st.text_area("Manuscript", value=full_text, height=600)
+m1, m2, m3, m4 = st.columns(4)
+m1.metric("Chapters", len(chapters))
+m2.metric("Words", f"{word_count(full_manuscript):,}")
+m3.metric("Continuity notes", sum(1 for row in chapters if row["summary"]))
+m4.metric("Model", model.replace("gemini-", "Gemini "))
 
-# TAB 4: PUBLISHER
-with t4:
-    if st.button("🧬 Analyze DNA"):
-        with st.spinner("Analyzing..."):
-            try:
-                res = model.generate_content(f"Analyze for KDP:\n{nc}\n{no}\n{rolling_sum}\nReturn: GENRE, TROPES, TONE").text
-                st.session_state.dna_res = res; st.rerun()
-            except Exception as e: st.error(f"Error: {e}")
-    if "dna_res" in st.session_state: st.info(st.session_state.dna_res)
+if not api_key:
+    st.info("Add a Gemini API key in the sidebar to enable generation and analysis. Everything else remains usable locally.")
 
-# TAB 5: EDITOR
-with t5:
-    st.header("🧐 Smart Consistency Editor")
-    def apply_minimal_fix(chap_num, old_text, new_text):
-        conn = sqlite3.connect(DB_NAME); c = conn.cursor()
-        c.execute("SELECT content FROM chapters WHERE book_id=? AND chapter_num=?", (st.session_state.active_book_id, chap_num))
-        row = c.fetchone()
-        if row:
-            updated = row[0].replace(old_text.strip(), new_text.strip())
-            if updated != row[0]:
-                ns = generate_summary(updated)
-                c.execute("UPDATE chapters SET content=?, summary=? WHERE book_id=? AND chapter_num=?", (updated, ns, st.session_state.active_book_id, chap_num))
-                conn.commit(); st.success(f"Fixed Ch {chap_num}!"); time.sleep(1)
-            else:
-                # Try a slightly looser match if exact match fails
-                st.warning("Exact match not found. Manual tweak may be required.")
-        conn.close()
+ai = ai_client(api_key, model) if api_key else None
 
-    strict_config = genai.types.GenerationConfig(temperature=0.1, top_p=0.95, max_output_tokens=65000)
-    if st.button("🔍 Run Full Logic Scan"):
-        if len(full_text) < 500: st.error("Too short.")
-        else:
-            with st.spinner("Analyzing..."):
-                prompt = f"""You are a Continuity Editor. Identify logic breaks and propose MINIMAL FIXES.
-                ### THE MANUSCRIPT
-                {full_text}
-                
-                OUTPUT FORMAT:
-                [Narrative Report]
-                ---FIX_BLOCK---
-                [ {{"chapter": 1, "find": "old text", "replace": "new text"}} ]
-                ---END_FIX_BLOCK---
-                """
+tab_book, tab_write, tab_manuscript, tab_editor, tab_publish = st.tabs(
+    ["Book", "Write", "Manuscript", "Continuity", "Positioning"]
+)
+
+with tab_book:
+    st.subheader("Story foundation")
+    st.caption("The concept and outline are the stable context used by drafting and continuity checks.")
+    left, right = st.columns(2, gap="large")
+    with left:
+        title_value = st.text_input("Title", value=book["title"])
+        concept_value = st.text_area("Concept / story bible", value=concept, height=420)
+    with right:
+        outline_value = st.text_area("Outline", value=outline, height=480)
+
+    if st.button("Save book context", type="primary"):
+        db.update_book(active_book_id, title_value, concept_value, outline_value)
+        st.success("Book context saved.")
+        st.rerun()
+
+with tab_write:
+    next_number = max(chapter_map, default=0) + 1
+    if "selected_chapter" not in st.session_state:
+        st.session_state.selected_chapter = next_number
+
+    top_left, top_right = st.columns([1, 4], gap="large")
+    with top_left:
+        chapter_number = st.number_input(
+            "Chapter",
+            min_value=1,
+            step=1,
+            value=int(st.session_state.selected_chapter),
+        )
+        st.session_state.selected_chapter = int(chapter_number)
+    with top_right:
+        existing = chapter_map.get(int(chapter_number), "")
+        st.caption("Existing chapter" if existing else "New chapter")
+        st.write(f"{word_count(existing):,} words" if existing else "Ready to draft")
+
+    plan_key = f"chapter_plan_{chapter_number}"
+    plan = st.text_area(
+        "Chapter plan",
+        value=st.session_state.get(plan_key, ""),
+        height=170,
+        placeholder="Write the chapter intent here, or extract it from the outline.",
+    )
+    st.session_state[plan_key] = plan
+
+    c1, c2, c3 = st.columns([1, 1, 2])
+    with c1:
+        if st.button("Extract from outline", use_container_width=True, disabled=not ai or not outline.strip()):
+            with st.spinner("Reading the outline…"):
                 try:
-                    cn = get_or_create_cache(nc, no)
-                    response = genai.GenerativeModel.from_cached_content(cached_content=genai.caching.CachedContent.get(name=cn)).generate_content(prompt, generation_config=strict_config) if cn else model.generate_content(prompt, generation_config=strict_config)
-                    if hasattr(response, 'text') and response.text:
-                        st.session_state.editor_report = response.text
-                        try:
-                            st.session_state.parsed_fixes = json.loads(response.text.split("---FIX_BLOCK---")[1].split("---END_FIX_BLOCK---")[0])
-                        except:
-                            st.session_state.parsed_fixes = []
-                        st.rerun()
-                except Exception as e: st.error(f"Error: {e}")
+                    st.session_state[plan_key] = ai.extract_chapter_plan(outline, int(chapter_number))
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Gemini error: {exc}")
+    with c2:
+        if st.button("Draft chapter", type="primary", use_container_width=True, disabled=not ai or not plan.strip()):
+            with st.spinner("Drafting with continuity context…"):
+                try:
+                    previous = chapter_map.get(int(chapter_number) - 1, "")
+                    st.session_state.editor_content = ai.draft_chapter(
+                        concept=concept,
+                        outline=outline,
+                        continuity_ledger=continuity,
+                        previous_text=previous,
+                        chapter_number=int(chapter_number),
+                        plan=plan,
+                    )
+                except Exception as exc:
+                    st.error(f"Gemini error: {exc}")
+    with c3:
+        if st.button("Load existing / start manually", use_container_width=True):
+            st.session_state.editor_content = existing
 
-    if "editor_report" in st.session_state:
-        st.markdown(st.session_state.editor_report.split("---FIX_BLOCK---")[0])
-        if st.session_state.get("parsed_fixes"):
-            st.divider(); st.subheader("🛠️ Propose Fixes")
-            for i, fix in enumerate(st.session_state.parsed_fixes):
-                with st.expander(f"Ch {fix['chapter']} Suggestion"):
-                    st.write(f"**Find:** {fix['find']}"); st.write(f"**Replace:** {fix['replace']}")
-                    if st.button("Apply", key=f"app_{fix['chapter']}_{i}"):
-                        apply_minimal_fix(fix['chapter'], fix['find'], fix['replace'])
-                        st.session_state.parsed_fixes.pop(i); st.rerun()
+    if "editor_content" in st.session_state:
+        st.divider()
+        editor_text = st.text_area(
+            "Chapter text",
+            value=st.session_state.editor_content,
+            height=620,
+            key="chapter_editor_widget",
+        )
+        st.caption(f"{word_count(editor_text):,} words")
+        save_col, discard_col, _ = st.columns([1, 1, 3])
+        with save_col:
+            if st.button("Save chapter", type="primary", use_container_width=True):
+                with st.spinner("Saving and refreshing continuity…"):
+                    try:
+                        summary = ai.summarize_chapter(editor_text) if ai else ""
+                        db.save_chapter(active_book_id, int(chapter_number), normalize_text(editor_text), summary)
+                        st.session_state.pop("editor_content", None)
+                        st.session_state.pop("chapter_editor_widget", None)
+                        st.success("Chapter saved.")
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Could not save chapter: {exc}")
+        with discard_col:
+            if st.button("Discard", use_container_width=True):
+                st.session_state.pop("editor_content", None)
+                st.session_state.pop("chapter_editor_widget", None)
+                st.rerun()
+
+    if chapters:
+        st.divider()
+        st.subheader("Saved chapters")
+        for row in reversed(chapters):
+            label = f"Chapter {row['chapter_num']} · {word_count(row['content']):,} words"
+            with st.expander(label):
+                if row["summary"]:
+                    st.caption("Continuity ledger")
+                    st.write(row["summary"])
+                st.markdown(row["content"])
+
+with tab_manuscript:
+    if not chapters:
+        st.info("Save a chapter and the assembled manuscript will appear here.")
+    else:
+        export_col, spacing_col = st.columns([1, 3])
+        with export_col:
+            docx = to_docx(full_manuscript, book["title"])
+            st.download_button(
+                "Download .docx",
+                data=docx.getvalue(),
+                file_name=f"{book['title']}.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                use_container_width=True,
+            )
+        with spacing_col:
+            spacing = st.radio("Reading view", ["Standard spacing", "Tight spacing"], horizontal=True)
+
+        view_text = full_manuscript if spacing == "Standard spacing" else normalize_text(full_manuscript, "tight")
+        reading, raw = st.tabs(["Reading view", "Raw text"])
+        with reading:
+            st.markdown(view_text)
+        with raw:
+            st.text_area("Full manuscript", value=view_text, height=700, label_visibility="collapsed")
+
+with tab_editor:
+    st.subheader("Continuity editor")
+    st.caption("Looks for material logic or continuity problems and proposes minimal exact-text fixes. Nothing is changed until you apply a suggestion.")
+
+    if st.button("Run continuity scan", type="primary", disabled=not ai or word_count(full_manuscript) < 100):
+        with st.spinner("Checking the manuscript…"):
+            try:
+                report, fixes = ai.consistency_scan(full_manuscript, concept, outline)
+                st.session_state.continuity_report = report
+                st.session_state.continuity_fixes = fixes
+            except Exception as exc:
+                st.error(f"Gemini error: {exc}")
+
+    if report := st.session_state.get("continuity_report"):
+        st.markdown(report)
+
+    fixes = st.session_state.get("continuity_fixes", [])
+    if fixes:
+        st.divider()
+        st.subheader("Proposed minimal fixes")
+        for index, fix in enumerate(fixes):
+            chapter_number = int(fix.get("chapter", 0) or 0)
+            with st.expander(f"Chapter {chapter_number} · {fix.get('reason', 'continuity fix')}"):
+                st.caption("Find")
+                st.code(str(fix.get("find", "")), language=None)
+                st.caption("Replace with")
+                st.code(str(fix.get("replace", "")), language=None)
+                if st.button("Apply this fix", key=f"fix_{index}", disabled=not ai):
+                    ok = replace_exact_text(
+                        db,
+                        active_book_id,
+                        chapter_number,
+                        str(fix.get("find", "")),
+                        str(fix.get("replace", "")),
+                        ai,
+                    )
+                    if ok:
+                        st.session_state.continuity_fixes.pop(index)
+                        st.success("Fix applied and chapter summary refreshed.")
+                        st.rerun()
+                    else:
+                        st.warning("The exact source text was not found. Nothing changed.")
+
+with tab_publish:
+    st.subheader("Reader positioning")
+    st.caption("A compact metadata-oriented read of the manuscript — genre, tropes, tone, reader promise and keyword directions.")
+    if st.button("Analyze positioning", type="primary", disabled=not ai):
+        with st.spinner("Analyzing the book…"):
+            try:
+                st.session_state.positioning = ai.analyze_market_dna(concept, outline, continuity)
+            except Exception as exc:
+                st.error(f"Gemini error: {exc}")
+    if positioning := st.session_state.get("positioning"):
+        st.markdown(positioning)
+
+st.divider()
+st.caption("Local-first prototype. Manuscript data stays in the local SQLite database; text is sent to Gemini only when you explicitly run an AI action.")
